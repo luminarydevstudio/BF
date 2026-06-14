@@ -536,6 +536,14 @@ local function RaidHasRaidTimer()
 	if main then
 		local timer = main:FindFirstChild("Timer")
 		if timer and timer:IsA("GuiObject") and timer.Visible then return true end
+		local topHud = main:FindFirstChild("TopHUDList")
+		local raidTimer = topHud and topHud:FindFirstChild("RaidTimer")
+		if raidTimer and raidTimer:IsA("GuiObject") and raidTimer.Visible then return true end
+	end
+	for _, gui in playerGui:GetDescendants() do
+		if gui.Name == "RaidTimer" and gui:IsA("GuiObject") and gui.Visible then
+			return true
+		end
 	end
 	return false
 end
@@ -896,7 +904,7 @@ local function syncNoclipState()
 		or (movementFollowOwner == "raid" and Raid.autoComplete)
 		or (movementFollowOwner == "raid_pad" and Raid.autoStart)
 		or (movementFollowOwner == "raid_lab" and (Raid.buyBeli or Raid.buyFruit))
-	) or (Raid.autoComplete and RaidHasRaidTimer())
+	) or (Raid.autoComplete and RaidHasTimer())
 		or (Raid.farmingActive and Raid.autoComplete)
 	setNoclip(shouldNoclip)
 end
@@ -2038,22 +2046,21 @@ end
 local function RaidKillAura()
 	local hrp = getRootPart()
 	if not hrp then return end
+	local hasSim = typeof(sethiddenproperty) == "function"
 	local function killEnemy(enemy)
 		if not enemy then return end
 		local hum = enemy:FindFirstChild("Humanoid")
 		if hum and hum.Health > 0 then
 			local mobRoot = enemy:FindFirstChild("HumanoidRootPart")
 			if mobRoot and (hrp.Position - mobRoot.Position).Magnitude < 1500 then
-				pcall(function()
-					if typeof(sethiddenproperty) == "function" then
-						sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
-					end
-				end)
-				mobRoot.Size = Vector3.new(75, 75, 75)
-				mobRoot.CanCollide = false
-				hum.Health = 0
+				if hasSim then
+					pcall(function() sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge) end)
+					mobRoot.Size = Vector3.new(75, 75, 75)
+					mobRoot.CanCollide = false
+					hum.Health = 0
+				end
 			end
-		else
+		elseif hum and hum.Health <= 0 then
 			local head = enemy:FindFirstChild("Head")
 			if head then pcall(function() head:Destroy() end) end
 		end
@@ -2068,8 +2075,19 @@ local function RaidKillAura()
 		killEnemy(child)
 	end
 end
+local function RaidAttackNearbyMobs()
+	local mobs = RaidGetMobs(nil)
+	if #mobs == 0 then return false end
+	RaidBringMobs(mobs, 1 / 30)
+	RaidAttackMobs(mobs)
+	return true
+end
 local function RaidCompleteStep()
-	if not Raid.autoComplete or not RaidHasRaidTimer() then
+	if not Raid.autoComplete then
+		Raid.farmingActive = false
+		return
+	end
+	if not RaidHasTimer() then
 		Raid.farmingActive = false
 		return
 	end
@@ -2086,15 +2104,20 @@ local function RaidCompleteStep()
 		Raid.farmingActive = true
 		local tool = getCharacter() and getCharacter():FindFirstChildOfClass("Tool")
 		if tool then pcall(function() tool:Activate() end) end
-		RaidKillAura()
-		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | kill aura farming", islandIndex), "Redz-style SimulationRadius + TP +70")
+		local usedAura = typeof(sethiddenproperty) == "function"
+		if usedAura then
+			RaidKillAura()
+		end
+		local usedHits = RaidAttackNearbyMobs()
+		local mode = usedAura and (usedHits and "aura+hits" or "aura only") or (usedHits and "register hits" or "no mobs in range")
+		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | %s", islandIndex, mode), usedAura and "SimulationRadius active" or "Executor missing sethiddenproperty - using RegisterHit fallback")
 	else
 		Raid.farmingActive = false
-		RaidSetDiag("busy", "Auto Complete", "Timer on - waiting for islands in range", "Islands spawn within 3000 studs")
+		RaidSetDiag("busy", "Auto Complete", "Raid timer on but no island found", "Stand on a raid island or wait for Island 1-5 within 3000 studs")
 	end
 end
 local function RaidTryAwaken()
-	if not Raid.autoAwaken or RaidHasTimer() or RaidOnAnyIsland() then return end
+	if not Raid.autoAwaken then return end
 	invokeCommF("Awakener", "Check")
 	invokeCommF("Awakener", "Awaken")
 end
@@ -2122,7 +2145,7 @@ local function RaidTick(dt)
 	if now - Raid.lastTick < 0.05 then return end
 	Raid.lastTick = now
 	RaidUpdateSession()
-	if RaidHasRaidTimer() then
+	if RaidHasTimer() then
 		if not Raid.autoComplete then
 			RaidSetDiag("warn", "Raid Active", "Raid timer running", "Enable Auto Complete Raid to auto-farm islands.")
 		end
@@ -2993,10 +3016,18 @@ end)
 task.spawn(function()
 	while alive do
 		task.wait()
-		if Raid.autoComplete and RaidHasRaidTimer() then
+		if Raid.autoComplete and RaidHasTimer() then
 			pcall(RaidCompleteStep)
 		elseif not Raid.autoComplete then
 			Raid.farmingActive = false
+		end
+	end
+end)
+task.spawn(function()
+	while alive do
+		task.wait(0.5)
+		if Raid.autoAwaken and Raid.autoComplete then
+			pcall(RaidTryAwaken)
 		end
 	end
 end)
