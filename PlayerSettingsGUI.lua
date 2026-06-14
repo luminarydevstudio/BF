@@ -143,14 +143,14 @@ local RAID_LAB = {
 local RAID_CFG = {
 	ISLAND_RANGE = 3000,
 	HOVER_Y = 70,
-	COMBAT_RANGE = 650,
+	COMBAT_RANGE = 900,
 	BRING_RANGE = 500,
 	PLAYER_GAP = 45,
 	HITBOX = 22,
 	FAST_ATTACK = 0.12,
 	NORMAL_ATTACK = 0.35,
 	CHIP_DELAY = 1,
-	START_DELAY = 1.5,
+	START_DELAY = 0,
 	PAD_SPEED = 280,
 	FIGHT_SPEED = 320,
 	PAD_NEAR = 12,
@@ -528,7 +528,18 @@ local function setNoclip(enabled)
 		end
 	end
 end
+local function RaidHasRaidTimer()
+	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+	if not playerGui then return false end
+	local main = playerGui:FindFirstChild("Main")
+	if main then
+		local timer = main:FindFirstChild("Timer")
+		if timer and timer:IsA("GuiObject") and timer.Visible then return true end
+	end
+	return false
+end
 local function RaidHasTimer()
+	if RaidHasRaidTimer() then return true end
 	local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
 	if not playerGui then return false end
 	local main = playerGui:FindFirstChild("Main")
@@ -565,11 +576,42 @@ local function RaidGetIsland(islandName)
 	if not locations then return nil end
 	for _, child in locations:GetChildren() do
 		if child.Name == islandName then
-			local part = getIslandPartFromInstance(child)
-			if part and (part.Position - hrp.Position).Magnitude <= RAID_CFG.ISLAND_RANGE then
-				return part
+			local pos
+			if child:IsA("BasePart") then
+				pos = child.Position
+			else
+				local part = getIslandPartFromInstance(child)
+				pos = part and part.Position
+			end
+			if pos and (pos - hrp.Position).Magnitude < RAID_CFG.ISLAND_RANGE then
+				if child:IsA("BasePart") then return child end
+				return getIslandPartFromInstance(child)
 			end
 		end
+	end
+	return nil
+end
+local function RaidGetPadDetector()
+	local map = workspace:FindFirstChild("Map")
+	if not map then return nil end
+	local sea = getSeaFromMap() or getCurrentSeaNumber()
+	if sea == 3 then
+		local zone = map:FindFirstChild("Boat Castle")
+		local pad = zone and zone:FindFirstChild("RaidSummon2")
+		local main = pad and pad:FindFirstChild("Button") and pad.Button:FindFirstChild("Main")
+		return main and main:FindFirstChild("ClickDetector")
+	end
+	local zone = map:FindFirstChild("CircleIsland")
+		or map:FindFirstChild("Hot and Cold")
+		or map:FindFirstChild("HotAndCold")
+	local pad = zone and zone:FindFirstChild("RaidSummon2")
+	local main = pad and pad:FindFirstChild("Button") and pad.Button:FindFirstChild("Main")
+	if main then return main:FindFirstChild("ClickDetector") end
+	for _, zoneName in ipairs({ "CircleIsland", "Hot and Cold", "HotAndCold", "Boat Castle" }) do
+		zone = map:FindFirstChild(zoneName)
+		pad = zone and zone:FindFirstChild("RaidSummon2")
+		main = pad and pad:FindFirstChild("Button") and pad.Button:FindFirstChild("Main")
+		if main then return main:FindFirstChild("ClickDetector") end
 	end
 	return nil
 end
@@ -1683,111 +1725,48 @@ local function RaidBuyChip()
 		RaidSetDiag("error", "Auto Buy Blocked", "No raid selected", "Open Select Raid and pick a chip type.")
 		return false
 	end
-	if not RaidIsSeaValid() then
-		local mapSea = getSeaFromMap()
-		local detail = "Raids only work on Sea 2 or Sea 3. Use TP tab sea buttons."
-		if mapSea == 2 or mapSea == 3 then
-			detail = "Map looks like Sea " .. tostring(mapSea) .. " but raid validation failed. Try rejoining."
-		elseif game.PlaceId == SEA_PLACE_IDS[1] then
-			detail = "You are on the main Blox Fruits place but still in Sea 1 content. Travel to Sea 2 via the TP tab."
-		end
-		RaidSetDiag("error", "Auto Buy Blocked", "Wrong sea (detected Sea " .. tostring(getCurrentSeaNumber()) .. ")", detail)
-		return false
-	end
 	if not getCommF() then
 		RaidSetDiag("error", "Auto Buy Blocked", "CommF_ not ready", "Wait for game to finish loading, then try again.")
 		return false
 	end
-	if RaidHasTimer() or RaidOnAnyIsland() then
+	if RaidHasRaidTimer() or RaidOnAnyIsland() then
 		RaidSetDiag("warn", "Auto Buy Waiting", "Raid already running", "Wait until the raid timer ends.")
 		return false
 	end
 	if RaidHasChip() then
 		RaidSetDiag("ok", "Auto Buy Done", "Microchip already in inventory", "Enable Auto Start Raid next.")
-		Raid.buyPhase = "idle"
 		return true
-	end
-	local blockers = RaidExplainBuyBlockers()
-	for _, reason in blockers do
-		if string.find(reason, "Level") or string.find(reason, "Beli ") or string.find(reason, "No fruit")
-			or string.find(reason, "No raid") or string.find(reason, "Sea ") or string.find(reason, "CommF")
-			or string.find(reason, "already have") or string.find(reason, "already active")
-		then
-			RaidSetDiag("error", "Auto Buy Blocked", reason, table.concat(blockers, "\n"))
-			return false
-		end
-	end
-	local labCf = RaidGetLabCFrame()
-	if not labCf then
-		RaidSetDiag("error", "Auto Buy Blocked", "Raid lab not found", "Could not locate laboratory on this sea.")
-		return false
-	end
-	if not RaidNearLab() then
-		Raid.buyPhase = "to_lab"
-		RaidFlyTo(labCf, "raid_lab", RAID_CFG.LAB_SPEED)
-		RaidSetDiag("busy", "Auto Buy", "Flying to raid laboratory...", "Chip purchase only works at the lab NPC.")
-		return false
-	end
-	clearMovement("raid_lab")
-	Raid.buyPhase = "purchase"
-	local hrp = getRootPart()
-	if hrp then
-		hrp.CFrame = labCf
-		if movementTweenPart then
-			movementTweenPart.CFrame = labCf
-		end
 	end
 	if Raid.buyFruit then
 		local fruitName, fruitValue = RaidGetLowestFruit()
 		if not fruitName then
-			RaidSetDiag("error", "Auto Buy Blocked", "No eligible fruit", table.concat(RaidExplainBuyBlockers(), "\n"))
+			RaidSetDiag("error", "Auto Buy Blocked", "No eligible fruit", "Put a fruit in storage or backpack first.")
 			return false
 		end
 		if not RaidHasFruitNamed(fruitName) then
-			if Raid.pendingFruit ~= fruitName or tick() - Raid.fruitLoadAt >= 1.5 then
-				Raid.pendingFruit = fruitName
-				Raid.fruitLoadAt = tick()
-				invokeCommF("LoadFruit", fruitName)
-				RaidSetDiag("busy", "Auto Buy", "Pulling fruit from storage...", string.format("%s ($%s)", fruitName, tostring(fruitValue or "?")))
-			else
-				RaidSetDiag("busy", "Auto Buy", "Waiting for fruit to load...", fruitName)
-			end
+			invokeCommF("LoadFruit", fruitName)
+			RaidSetDiag("busy", "Auto Buy", "Pulling fruit from storage...", string.format("%s ($%s)", fruitName, tostring(fruitValue or "?")))
 			return false
 		end
-		Raid.pendingFruit = nil
 		RaidEquipFruitNamed(fruitName)
-	elseif Raid.buyBeli then
+	else
 		RaidUnequipAll()
 	end
 	local now = tick()
 	if now - Raid.lastBuyInvoke < 1 then
-		RaidSetDiag("busy", "Auto Buy", "Talking to raid NPC...", "Waiting for server response...")
 		return false
 	end
 	Raid.lastBuyInvoke = now
-	local okInvoke, invokeResult = RaidInvokeChipSelect()
+	if Raid.selected == "Rumble" then
+		invokeCommF("ThunderGodTalk", true)
+		invokeCommF("ThunderGodTalk")
+	end
+	invokeCommF("RaidsNpc", "Select", Raid.selected)
 	if RaidHasChip() then
-		Raid.buyPhase = "idle"
-		RaidSetDiag("ok", "Auto Buy Success", "Microchip acquired", "You can now enable Auto Start Raid.")
+		RaidSetDiag("ok", "Auto Buy Success", "Microchip acquired", "Enable Auto Start Raid next.")
 		return true
 	end
-	local detail = "Sent RaidsNpc Select for " .. tostring(Raid.selected)
-	if Raid.buyBeli then
-		detail = detail .. ". Beli mode: no fruit equipped, server charges 100k beli at lvl 1100+."
-	elseif Raid.buyFruit then
-		detail = detail .. " using lowest fruit in bag."
-	end
-	if not okInvoke then
-		detail = tostring(invokeResult) .. "\n" .. detail
-	end
-	if invokeResult and type(invokeResult) == "string" and invokeResult ~= "" then
-		detail = "Server: " .. invokeResult .. "\n" .. detail
-	end
-	local blockersNow = RaidExplainBuyBlockers()
-	if #blockersNow > 0 then
-		detail = table.concat(blockersNow, "\n") .. "\n" .. detail
-	end
-	RaidSetDiag("warn", "Auto Buy Retrying", "Chip not received yet", detail)
+	RaidSetDiag("warn", "Auto Buy Retrying", "Chip not received yet", "Sent RaidsNpc Select for " .. tostring(Raid.selected) .. " (retries every 1s like Redz).")
 	return false
 end
 local function RaidFlyTo(cf, owner, speed)
@@ -1803,32 +1782,56 @@ local function RaidStart()
 		RaidSetDiag("error", "Auto Start Blocked", "No microchip in inventory", "Enable Auto Buy Chip first.")
 		return false
 	end
-	if RaidHasTimer() then return false end
+	if RaidHasRaidTimer() then return false end
 	if RaidOnAnyIsland() then return false end
-	local now = tick()
-	if now - Raid.startAt < RAID_CFG.START_DELAY then return false end
-	local padCf, detector = RaidGetPad()
-	if not padCf then
+	RaidEquipChip()
+	local detector = RaidGetPadDetector()
+	if not detector then
 		RaidSetDiag("error", "Auto Start Blocked", "Raid pad not found", "Make sure you are on Sea 2 or Sea 3.")
 		return false
 	end
-	local hrp = getRootPart()
-	if not hrp then return false end
-	local dist = (hrp.Position - padCf.Position).Magnitude
-	if dist > RAID_CFG.PAD_NEAR then
-		RaidFlyTo(padCf, "raid_pad", RAID_CFG.PAD_SPEED)
-		RaidSetDiag("busy", "Auto Start", "Flying to raid summon pad...", "Equip chip happens automatically at the pad.")
-		return false
+	if typeof(fireclickdetector) == "function" then
+		pcall(fireclickdetector, detector, 0)
+	else
+		RaidClickPad(detector)
 	end
-	clearMovement("raid_pad")
-	Raid.startAt = now
-	RaidEquipChip()
-	if not RaidClickPad(detector) then
-		RaidSetDiag("error", "Auto Start Blocked", "Could not click raid pad", "Your executor may need fireclickdetector support.")
-		return false
-	end
-	RaidSetDiag("busy", "Auto Start", "Pad clicked - entering raid...", "Waiting for Island 1 to spawn.")
+	RaidSetDiag("busy", "Auto Start", "Pad clicked - entering raid...", "Waiting for Island 1 (Redz instant start, no tween).")
 	return true
+end
+local function RaidTryFruitTransform()
+	local char = getCharacter()
+	local humanoid = getHumanoid()
+	if not char or not humanoid then return end
+	if char:FindFirstChild("Transform") or char:FindFirstChild("Transformed") then return end
+	local raidName = string.lower(Raid.selected or "")
+	if not string.find(raidName, "buddha", 1, true) and not string.find(raidName, "dough", 1, true) then
+		return
+	end
+	local function matchesRaid(tool)
+		local lower = string.lower(tool.Name)
+		return string.find(lower, raidName, 1, true) or string.find(lower, "buddha", 1, true) and string.find(raidName, "buddha", 1, true)
+	end
+	for _, container in ipairs({ LocalPlayer.Backpack, char }) do
+		if container then
+			for _, tool in container:GetChildren() do
+				if tool:IsA("Tool") and (tool.ToolTip == "Blox Fruit" or tool:FindFirstChild("Fruit")) and matchesRaid(tool) then
+					if tool.Parent ~= char then
+						pcall(function() humanoid:EquipTool(tool) end)
+					end
+					pcall(function() tool:Activate() end)
+					if VirtualInputManager then
+						for _, key in ipairs({ Enum.KeyCode.F, Enum.KeyCode.Z }) do
+							pcall(function()
+								VirtualInputManager:SendKeyEvent(true, key, false, game)
+								VirtualInputManager:SendKeyEvent(false, key, false, game)
+							end)
+						end
+					end
+					return
+				end
+			end
+		end
+	end
 end
 local function RaidGetNetRemotes()
 	local modules = ReplicatedStorage:FindFirstChild("Modules")
@@ -1836,16 +1839,30 @@ local function RaidGetNetRemotes()
 	if not net then return nil, nil end
 	return net:FindFirstChild("RE/RegisterAttack"), net:FindFirstChild("RE/RegisterHit")
 end
+local function RaidPivotTo(cf)
+	local hrp = getRootPart()
+	if not hrp or not cf then return end
+	clearMovement("raid_pad")
+	hrp.CFrame = cf
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+	if movementTweenPart then
+		movementTweenPart.CFrame = cf
+	end
+end
 local function RaidEquipWeapon()
 	local character, humanoid = getCharacter(), getHumanoid()
 	if not character or not humanoid then return nil end
 	local tooltip = WEAPON_TOOLTIPS[attackSettings.weaponType] or attackSettings.weaponType
-	for _, container in ipairs({ LocalPlayer.Backpack, character }) do
-		if container then
-			for _, tool in container:GetChildren() do
-				if tool:IsA("Tool") and tool.ToolTip == tooltip then
-					if tool.Parent ~= character then pcall(function() humanoid:EquipTool(tool) end) end
-					return tool
+	local fallbacks = { tooltip, "Melee", "Sword", "Blox Fruit", "Gun" }
+	for _, tip in fallbacks do
+		for _, container in ipairs({ LocalPlayer.Backpack, character }) do
+			if container then
+				for _, tool in container:GetChildren() do
+					if tool:IsA("Tool") and tool.ToolTip == tip then
+						if tool.Parent ~= character then pcall(function() humanoid:EquipTool(tool) end) end
+						return tool
+					end
 				end
 			end
 		end
@@ -1864,14 +1881,11 @@ local function RaidGetMobs(islandPart)
 	if not hrp then return results end
 	local enemies = workspace:FindFirstChild("Enemies")
 	if not enemies then return results end
-	local anchor = islandPart and islandPart.Position or hrp.Position
-	local scanRange = islandPart and RAID_CFG.COMBAT_RANGE or 700
+	local scanRange = RAID_CFG.COMBAT_RANGE
 	for _, mob in enemies:GetChildren() do
 		if RaidAliveMob(mob) then
 			local root = mob.HumanoidRootPart
-			if (root.Position - hrp.Position).Magnitude <= scanRange
-				and (not islandPart or (root.Position - anchor).Magnitude <= scanRange)
-			then
+			if (root.Position - hrp.Position).Magnitude <= scanRange then
 				table.insert(results, mob)
 			end
 		end
@@ -2004,13 +2018,15 @@ local function RaidHoverIsland(islandPart, dt)
 	hrp.AssemblyAngularVelocity = Vector3.zero
 end
 local function RaidRunCombat(dt)
-	if not Raid.autoComplete or not RaidHasTimer() then return end
+	if not Raid.autoComplete or not RaidHasRaidTimer() then return end
 	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
 	setNoclip(true)
 	RaidSetCombatState(true)
+	RaidEquipWeapon()
+	RaidTryFruitTransform()
 	local islandPart, islandIndex = RaidGetHighestIsland()
 	if islandPart then
-		RaidHoverIsland(islandPart, dt)
+		RaidPivotTo(islandPart.CFrame + Vector3.new(0, RAID_CFG.HOVER_Y, 0))
 	end
 	local mobs = RaidGetMobs(islandPart)
 	if #mobs == 0 then
@@ -2057,7 +2073,7 @@ local function RaidTick(dt)
 	if now - Raid.lastTick < 0.05 then return end
 	Raid.lastTick = now
 	RaidUpdateSession()
-	if RaidHasTimer() then
+	if RaidHasRaidTimer() then
 		if not Raid.autoComplete then
 			RaidSetDiag("warn", "Raid Active", "Raid timer running", "Enable Auto Complete Raid to auto-farm islands.")
 		end
@@ -2914,7 +2930,7 @@ jumpSlider = createSliderRow(playerPanel, "Jump Height", round(pendingJump), 2)
 connect(RunService.RenderStepped, function(dt)
 	if not alive then return end
 	syncMovementTween(dt)
-	if Raid.autoComplete and RaidHasTimer() then
+	if Raid.autoComplete and RaidHasRaidTimer() then
 		pcall(RaidRunCombat, dt)
 	end
 	if movementFollowOwner then return end
