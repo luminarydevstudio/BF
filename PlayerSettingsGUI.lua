@@ -126,13 +126,14 @@ local RAID_PLAYER_GAP = 50
 local RAID_HITBOX_SIZE = 24
 local RAID_FAST_ATTACK = 0.016
 local RAID_CHIP_BUY_DELAY, RAID_START_DELAY = 1, 1
-local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 265
-local RAID_MOVE_CAP = 320
-local RAID_MOVE_SPEED = 288
-local RAID_MOVE_SPEED_TRAVEL = 300
-local RAID_MOVE_ALPHA_CAP = 0.18
-local RAID_HOVER_LERP, RAID_HOVER_TRAVEL_LERP = 18, 14
-local RAID_MOB_LERP = 14
+local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 220
+local RAID_MOVE_CAP = 260
+local RAID_MOVE_SPEED = 210
+local RAID_MOVE_SPEED_TRAVEL = 228
+local RAID_MOVE_ALPHA_CAP = 0.12
+local RAID_HOVER_LERP, RAID_HOVER_TRAVEL_LERP = 11, 9
+local RAID_MOB_LERP = 11
+local RAID_MOB_PULL_SPEED = 165
 local RAID_MOB_RING_BASE, RAID_MOB_RING_STEP = 14, 10
 local RAID_ISLAND_CLEAR_DELAY = 2.2
 local raidAttackAccum, raidSavedAutoRotate = 0, nil
@@ -493,10 +494,10 @@ local function cleanupRaidMovement()
 	if enemies then
 		for _, mob in enemies:GetChildren() do
 			local mobRoot = mob:FindFirstChild("HumanoidRootPart")
-			local lock = mobRoot and mobRoot:FindFirstChild("PSG_RaidBring")
-			if lock then
-				lock:Destroy()
-			end
+			local lock = mobRoot:FindFirstChild("PSG_RaidBring")
+			if lock then lock:Destroy() end
+			local hitPart = mobRoot:FindFirstChild("PSG_RaidHit")
+			if hitPart then hitPart:Destroy() end
 		end
 	end
 	if movementFollowOwner == "raid" or movementFollowOwner == "raid_start" then
@@ -1573,20 +1574,11 @@ local function attackAllMobs(mobs)
 	if #mobs == 0 then return end
 	local tool = equipWeaponByType(attackSettings.weaponType)
 	if not tool then return end
-	if tool.ToolTip == "Blox Fruit" then
-		local leftClick = tool:FindFirstChild("LeftClickRemote")
-		if leftClick and leftClick:IsA("RemoteEvent") then
-			pcall(function()
-				leftClick:FireServer(Vector3.new(0, -500, 0), 1, true)
-				leftClick:FireServer(false)
-			end)
-			return
-		end
-	end
 	local hitList, primaryHit = {}, nil
 	for _, mob in mobs do
 		if isAliveMob(mob) then
-			local hitPart = mob:FindFirstChild("Head") or mob.HumanoidRootPart
+			local mobRoot = mob.HumanoidRootPart
+			local hitPart = mobRoot:FindFirstChild("PSG_RaidHit") or mob:FindFirstChild("Head") or mobRoot
 			if hitPart then
 				table.insert(hitList, { mob, hitPart })
 				if not primaryHit then primaryHit = hitPart end
@@ -1596,11 +1588,19 @@ local function attackAllMobs(mobs)
 	if #hitList == 0 or not primaryHit then return end
 	local registerAttack, registerHit = getRaidNetRemotes()
 	if not registerAttack or not registerHit then return end
+	if tool.ToolTip == "Blox Fruit" then
+		local leftClick = tool:FindFirstChild("LeftClickRemote")
+		if leftClick and leftClick:IsA("RemoteEvent") then
+			pcall(function()
+				leftClick:FireServer(Vector3.new(0, -RAID_PLAYER_GAP, 0), #hitList, true)
+				leftClick:FireServer(false)
+			end)
+		end
+	end
+	pcall(function() tool:Activate() end)
 	registerAttack:FireServer(0)
 	local hitsFn = resolveSendHits()
-	if attackSettings.attackMode == "Fast" and hitsFn then
-		pcall(hitsFn, primaryHit, hitList)
-	end
+	if hitsFn then pcall(hitsFn, primaryHit, hitList) end
 	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
 end
 local function raidCappedLerpAlpha(fromPos, toPos, dt, speedStudsPerSec)
@@ -1632,53 +1632,78 @@ local function smoothCombatHover(islandPart, dt)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero
 end
-local function expandRaidMobHitbox(mob, playerHrp, dt)
-	if not mob or not playerHrp then return end
+local function getOrCreateRaidHitPart(mob, mobRoot)
+	local hit = mobRoot:FindFirstChild("PSG_RaidHit")
+	if hit then return hit end
+	hit = Instance.new("Part")
+	hit.Name = "PSG_RaidHit"
+	hit.Anchored = false
+	hit.CanCollide = false
+	hit.Transparency = 1
+	hit.Massless = true
+	hit.Size = Vector3.new(38, RAID_PLAYER_GAP - 6, 38)
+	hit.CFrame = mobRoot.CFrame * CFrame.new(0, (RAID_PLAYER_GAP - 6) * 0.5, 0)
+	local weld = Instance.new("WeldConstraint")
+	weld.Part0 = mobRoot
+	weld.Part1 = hit
+	weld.Parent = hit
+	hit.Parent = mobRoot
+	return hit
+end
+local function prepareMobForRaid(mob)
 	local head = mob:FindFirstChild("Head")
 	local mobRoot = mob:FindFirstChild("HumanoidRootPart")
+	local humanoid = mob:FindFirstChild("Humanoid")
 	if not head or not mobRoot then return end
-	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
-	local smooth = 1 - math.exp(-RAID_MOB_LERP * dt)
+	if humanoid then
+		humanoid.WalkSpeed = 0
+		humanoid.JumpPower = 0
+		humanoid.AutoRotate = false
+	end
+	mobRoot.CanCollide = false
 	head.CanCollide = false
 	head.Massless = true
 	head.Transparency = 1
-	mobRoot.CanCollide = false
-	local bodySize = Vector3.new(10, 8, 10)
-	mobRoot.Size = bodySize
-	local bridgeHeight = math.max(RAID_PLAYER_GAP - 10, 28)
-	head.Size = Vector3.new(RAID_HITBOX_SIZE, bridgeHeight, RAID_HITBOX_SIZE)
-	local bridgeCenter = mobRoot.Position:Lerp(playerHrp.Position, 0.42)
-	local targetHeadCf = CFrame.new(bridgeCenter)
-	head.CFrame = head.CFrame:Lerp(targetHeadCf, smooth)
+	mobRoot.Size = Vector3.new(32, 24, 32)
+	head.Size = Vector3.new(RAID_HITBOX_SIZE, RAID_HITBOX_SIZE, RAID_HITBOX_SIZE)
+	head.CFrame = mobRoot.CFrame * CFrame.new(0, 1.5, 0)
+	getOrCreateRaidHitPart(mob, mobRoot)
 end
 local function bringMobsUnderPlayer(mobs, dt)
 	local hrp = getRootPart()
 	if not hrp then return end
 	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
-	local anchor = hrp.Position + Vector3.new(0, -RAID_PLAYER_GAP, 0)
+	local floorY = hrp.Position.Y - RAID_PLAYER_GAP
 	for index, mob in ipairs(mobs) do
 		if not isAliveMob(mob) then continue end
 		local mobRoot = mob.HumanoidRootPart
 		if (mobRoot.Position - hrp.Position).Magnitude > RAID_BRING_RANGE then continue end
+		prepareMobForRaid(mob)
 		local angle = (index / math.max(#mobs, 1)) * math.pi * 2
 		local ring = RAID_MOB_RING_BASE + ((index - 1) % 4) * RAID_MOB_RING_STEP
-		local offset = Vector3.new(math.cos(angle) * ring, RAID_BRING_UNDER, math.sin(angle) * ring)
-		local targetPos = anchor + offset
+		local targetPos = Vector3.new(
+			hrp.Position.X + math.cos(angle) * ring,
+			floorY,
+			hrp.Position.Z + math.sin(angle) * ring
+		)
+		local currentPos = mobRoot.Position
+		local needsPullDown = currentPos.Y > floorY + 2
+		local pullSpeed = needsPullDown and RAID_MOB_PULL_SPEED * 1.35 or RAID_MOB_PULL_SPEED
+		local stepAlpha = raidCappedLerpAlpha(currentPos, targetPos, dt, pullSpeed)
+		local newPos = currentPos:Lerp(targetPos, stepAlpha)
 		mobRoot.AssemblyLinearVelocity = Vector3.zero
 		mobRoot.AssemblyAngularVelocity = Vector3.zero
+		mobRoot.CFrame = CFrame.new(newPos)
 		local lock = mobRoot:FindFirstChild("PSG_RaidBring")
 		if not lock then
 			lock = Instance.new("BodyPosition")
 			lock.Name = "PSG_RaidBring"
-			lock.MaxForce = Vector3.new(350000, 350000, 350000)
-			lock.P = 3800
-			lock.D = 1600
+			lock.MaxForce = Vector3.new(400000, 400000, 400000)
+			lock.P = 3200
+			lock.D = 1800
 			lock.Parent = mobRoot
-			lock.Position = mobRoot.Position
 		end
-		local stepAlpha = raidCappedLerpAlpha(lock.Position, targetPos, dt, 200)
-		lock.Position = lock.Position:Lerp(targetPos, stepAlpha)
-		expandRaidMobHitbox(mob, hrp, dt)
+		lock.Position = newPos
 	end
 end
 local function getRaidMobsNearPlayer(islandPart)
