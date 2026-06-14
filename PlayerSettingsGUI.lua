@@ -63,8 +63,9 @@ local function showBootError(msg)
 	lbl.Parent = errGui
 end
 local SLIDER_MAX = 100
-local GUI_W, GUI_H = 580, 520
+local GUI_W, GUI_H = 580, 582
 local SIDEBAR_W = 132
+local DIAG_PANEL_H = 64
 local EXPANDED_SIZE = Vector2.new(GUI_W, GUI_H)
 local COLLAPSED_SIZE = Vector2.new(GUI_W, 48)
 local CORNER_RADIUS = 8
@@ -127,6 +128,17 @@ local Raid = {
 	chipBuyAt = 0,
 	startAt = 0,
 	lastTick = 0,
+	buyPhase = "idle",
+	buyPayStep = 1,
+	lastBuyInvoke = 0,
+	diagLevel = "idle",
+	diagTitle = "System Status",
+	diagMessage = "Ready - toggle a raid option to begin.",
+	diagDetail = "",
+}
+local RAID_LAB = {
+	[2] = CFrame.new(-5556.24316, 314.034393, -2974.21533),
+	[3] = CFrame.new(-5017.15234, 315.784210, -3013.84326),
 }
 local RAID_CFG = {
 	ISLAND_RANGE = 3000,
@@ -137,13 +149,18 @@ local RAID_CFG = {
 	HITBOX = 22,
 	FAST_ATTACK = 0.12,
 	NORMAL_ATTACK = 0.35,
-	CHIP_DELAY = 1.2,
+	CHIP_DELAY = 1,
 	START_DELAY = 1.5,
 	PAD_SPEED = 280,
 	FIGHT_SPEED = 320,
 	PAD_NEAR = 12,
+	LAB_NEAR = 18,
+	LAB_SPEED = 300,
+	CHIP_BUY_LEVEL = 1100,
+	CHIP_BELI_COST = 100000,
 }
-local raidStatusLabel, raidSelectBtn, raidSelectedLabel, raidMenu, raidMenuLayout
+local raidStatusLabel, raidSelectBtn, raidSelectedLabel, raidMenu, raidMenuLayout, raidStatsLabel
+local diagPanel, diagAccent, diagTitleLabel, diagMessageLabel, diagDetailLabel
 local lastSkillTicks = { Z = 0, X = 0, C = 0, V = 0, F = 0 }
 local sendHitsToServer = nil
 local fakeHitId = tostring(LocalPlayer.UserId):sub(2, 4) .. "psg"
@@ -383,9 +400,11 @@ local function setMovementTarget(cframe, owner, speed)
 	movementFollowTarget = cframe
 	movementFollowOwner = owner
 	if speed then
-		if owner == "raid" or owner == "raid_pad" then
+		if owner == "raid" or owner == "raid_pad" or owner == "raid_lab" then
 			if owner == "raid_pad" then
 				RAID_CFG.PAD_SPEED = speed
+			elseif owner == "raid_lab" then
+				RAID_CFG.LAB_SPEED = speed
 			else
 				RAID_CFG.FIGHT_SPEED = speed
 			end
@@ -413,12 +432,14 @@ end
 local function hubFlyTo(cf, speed, owner)
 	if not cf then return end
 	local ownerName = owner or movementFollowOwner or "island"
-	if ownerName == "island" or ownerName == "fruit" or ownerName == "raid" or ownerName == "raid_pad" then
+	if ownerName == "island" or ownerName == "fruit" or ownerName == "raid" or ownerName == "raid_pad" or ownerName == "raid_lab" then
 		local flySpeed = MOVEMENT_SPEED_ISLAND
 		if ownerName == "fruit" then
 			flySpeed = MOVEMENT_SPEED_FRUIT
 		elseif ownerName == "raid_pad" then
 			flySpeed = RAID_CFG.PAD_SPEED
+		elseif ownerName == "raid_lab" then
+			flySpeed = RAID_CFG.LAB_SPEED
 		elseif ownerName == "raid" then
 			flySpeed = RAID_CFG.FIGHT_SPEED
 		end
@@ -603,7 +624,7 @@ local function RaidCleanup()
 			end
 		end
 	end
-	if movementFollowOwner == "raid" or movementFollowOwner == "raid_pad" then
+	if movementFollowOwner == "raid" or movementFollowOwner == "raid_pad" or movementFollowOwner == "raid_lab" then
 		clearMovement(movementFollowOwner)
 	end
 	RaidSetCombatState(false)
@@ -614,12 +635,145 @@ end
 local function RaidInWorld()
 	return RaidHasTimer() or RaidOnAnyIsland()
 end
+local function RaidGetStat(statName)
+	local leaderstats = LocalPlayer:FindFirstChild("leaderstats")
+	if leaderstats then
+		local stat = leaderstats:FindFirstChild(statName)
+		if stat then return stat.Value end
+	end
+	local data = LocalPlayer:FindFirstChild("Data")
+	if data then
+		local stat = data:FindFirstChild(statName)
+		if stat then return stat.Value end
+	end
+	if statName == "Beli" then
+		return RaidGetStat("Money")
+	end
+	return nil
+end
+local function RaidGetLiveStatsText()
+	local sea = getCurrentSeaNumber()
+	local level = tonumber(RaidGetStat("Level")) or 0
+	local beli = tonumber(RaidGetStat("Beli")) or 0
+	local chip = RaidHasChip() and "Yes" or "No"
+	return string.format("Sea %s | Lvl %s | Beli %s | Chip %s", tostring(sea), tostring(level), tostring(beli), chip)
+end
+local function RaidGetLabCFrame()
+	local sea = getCurrentSeaNumber()
+	if RAID_LAB[sea] then return RAID_LAB[sea] end
+	local npcs = workspace:FindFirstChild("NPCs")
+	if npcs then
+		for _, npc in npcs:GetChildren() do
+			local lower = string.lower(npc.Name)
+			if string.find(lower, "mysterious", 1, true)
+				or string.find(lower, "scientist", 1, true)
+				or string.find(lower, "raid", 1, true)
+			then
+				local part = npc:FindFirstChild("HumanoidRootPart") or npc:FindFirstChildWhichIsA("BasePart", true)
+				if part then return part.CFrame * CFrame.new(0, 3, 0) end
+			end
+		end
+	end
+	return nil
+end
+local function RaidNearLab()
+	local hrp = getRootPart()
+	local labCf = RaidGetLabCFrame()
+	if not hrp or not labCf then return false end
+	return (hrp.Position - labCf.Position).Magnitude <= RAID_CFG.LAB_NEAR
+end
+local function RaidSetDiag(level, title, message, detail)
+	Raid.diagLevel = level or "idle"
+	Raid.diagTitle = title or "Raid System"
+	Raid.diagMessage = message or ""
+	Raid.diagDetail = detail or ""
+	Raid.status = Raid.diagMessage
+	if Raid.diagDetail ~= "" then
+		Raid.status = Raid.diagMessage .. "\n" .. Raid.diagDetail
+	end
+end
+local function RaidRefreshDiagUI()
+	if not diagMessageLabel then return end
+	local colors = {
+		idle = COLORS.textMuted,
+		ok = COLORS.success,
+		warn = COLORS.warn,
+		error = COLORS.danger,
+		busy = COLORS.accent,
+	}
+	local level = Raid.diagLevel or "idle"
+	local color = colors[level] or COLORS.textMuted
+	if diagAccent then diagAccent.BackgroundColor3 = color end
+	if diagTitleLabel then
+		diagTitleLabel.Text = Raid.diagTitle or "Raid System"
+		diagTitleLabel.TextColor3 = color
+	end
+	if diagMessageLabel then
+		diagMessageLabel.Text = Raid.diagMessage or "Ready."
+		diagMessageLabel.TextColor3 = COLORS.text
+	end
+	if diagDetailLabel then
+		diagDetailLabel.Text = Raid.diagDetail or ""
+		diagDetailLabel.TextColor3 = COLORS.textMuted
+	end
+	if raidStatusLabel then
+		raidStatusLabel.TextColor3 = color
+		raidStatusLabel.Text = Raid.status
+	end
+end
+local function RaidExplainBuyBlockers()
+	local checks = {}
+	if not Raid.selected then
+		table.insert(checks, "No raid selected in dropdown")
+	end
+	if not RaidIsSeaValid() then
+		table.insert(checks, "You are on Sea " .. tostring(getCurrentSeaNumber()) .. " (need Sea 2 or 3)")
+	end
+	if not getCommF() then
+		table.insert(checks, "CommF_ remote missing (rejoin or wait for load)")
+	end
+	if RaidHasTimer() or RaidOnAnyIsland() then
+		table.insert(checks, "A raid is already active")
+	end
+	if RaidHasChip() then
+		table.insert(checks, "You already have Special Microchip")
+	end
+	if Raid.buyBeli then
+		local level = tonumber(RaidGetStat("Level")) or 0
+		local beli = tonumber(RaidGetStat("Beli")) or 0
+		if level < RAID_CFG.CHIP_BUY_LEVEL then
+			table.insert(checks, string.format("Level %d / %d required for beli chip", level, RAID_CFG.CHIP_BUY_LEVEL))
+		end
+		if beli < RAID_CFG.CHIP_BELI_COST then
+			table.insert(checks, string.format("Beli %s / %s required", tostring(beli), tostring(RAID_CFG.CHIP_BELI_COST)))
+		end
+		local char = getCharacter()
+		if char then
+			for _, tool in char:GetChildren() do
+				if tool:IsA("Tool") and (tool:FindFirstChild("Fruit") or tool.ToolTip == "Blox Fruit") then
+					table.insert(checks, "Unequip fruit before beli chip buy")
+					break
+				end
+			end
+		end
+	end
+	if Raid.buyFruit then
+		local fruitName = RaidGetLowestFruit()
+		if not fruitName then
+			table.insert(checks, RaidIsAdvanced(Raid.selected)
+				and "No fruit worth 1M+ in storage/backpack"
+				or "No fruit in storage/backpack")
+		end
+	end
+	return checks
+end
 local function syncNoclipState()
 	local shouldNoclip = movementFollowOwner ~= nil and (
 		(movementFollowOwner == "island" and teleportToIslandEnabled)
 		or (movementFollowOwner == "fruit" and autoTweenFruit)
 		or (movementFollowOwner == "raid" and Raid.autoComplete)
 		or (movementFollowOwner == "raid_pad" and Raid.autoStart)
+		or (movementFollowOwner == "raid_lab" and (Raid.buyBeli or Raid.buyFruit))
 	) or (Raid.autoComplete and (RaidHasTimer() or RaidOnAnyIsland()))
 	setNoclip(shouldNoclip)
 end
@@ -645,6 +799,7 @@ local function syncMovementTween(dt)
 	if not alive or not movementFollowTarget then return end
 	if movementFollowOwner == "raid" and not Raid.autoComplete then return end
 	if movementFollowOwner == "raid_pad" and not Raid.autoStart then return end
+	if movementFollowOwner == "raid_lab" and not Raid.buyBeli and not Raid.buyFruit then return end
 	if movementFollowOwner == "island" and not teleportToIslandEnabled then return end
 	if movementFollowOwner == "fruit" and not autoTweenFruit then return end
 	local hrp = getRootPart()
@@ -658,13 +813,15 @@ local function syncMovementTween(dt)
 		speed = RAID_CFG.FIGHT_SPEED
 	elseif movementFollowOwner == "raid_pad" then
 		speed = RAID_CFG.PAD_SPEED
+	elseif movementFollowOwner == "raid_lab" then
+		speed = RAID_CFG.LAB_SPEED
 	end
 	local current = movementTweenPart.CFrame
 	local goal = movementFollowTarget
 	local dist = (current.Position - goal.Position).Magnitude
 	local step = speed * dt
 	local alpha = dist > 0 and math.clamp(step / dist, 0, 1) or 1
-	if movementFollowOwner == "raid" or movementFollowOwner == "raid_pad" then
+	if movementFollowOwner == "raid" or movementFollowOwner == "raid_pad" or movementFollowOwner == "raid_lab" then
 		alpha = math.min(alpha, 0.18)
 	end
 	local nextCf = current:Lerp(goal, alpha)
@@ -1443,67 +1600,124 @@ local function RaidUnequipAll()
 	local humanoid = getHumanoid()
 	if humanoid then pcall(function() humanoid:UnequipTools() end) end
 end
-local function RaidBuyChip()
-	if not Raid.selected then
-		Raid.status = "Buy: select a raid first"
-		return false
-	end
-	if not RaidIsSeaValid() then
-		Raid.status = "Buy: raids only work on Sea 2 or Sea 3"
-		return false
-	end
-	if RaidHasTimer() or RaidOnAnyIsland() then
-		Raid.status = "Buy: wait until current raid ends"
-		return false
-	end
-	if RaidHasChip() then
-		Raid.status = "Buy: already holding microchip"
-		return false
-	end
+local function RaidInvokeChipSelect()
 	if Raid.selected == "Rumble" then
 		invokeCommF("ThunderGodTalk", true)
 		invokeCommF("ThunderGodTalk")
 	end
-	RaidUnequipAll()
-	invokeCommF("RaidsNpc", "Select", Raid.selected)
-	if Raid.buyBeli then
-		invokeCommF("RaidsNpc", "Select", Raid.selected, "Money")
-		invokeCommF("RaidsNpc", "Select", Raid.selected, "Beli")
+	local ok, result = invokeCommF("RaidsNpc", "Select", Raid.selected)
+	if not ok then
+		return false, "CommF failed: " .. tostring(result)
+	end
+	return true, result
+end
+local function RaidBuyChip()
+	if not Raid.buyBeli and not Raid.buyFruit then
+		RaidSetDiag("idle", "Auto Buy", "Enable Beli or Fruit buy toggle", "")
+		return false
+	end
+	if not Raid.selected then
+		RaidSetDiag("error", "Auto Buy Blocked", "No raid selected", "Open Select Raid and pick a chip type.")
+		return false
+	end
+	if not RaidIsSeaValid() then
+		RaidSetDiag("error", "Auto Buy Blocked", "Wrong sea", "Raids only work on Sea 2 or Sea 3. Use TP tab sea buttons.")
+		return false
+	end
+	if not getCommF() then
+		RaidSetDiag("error", "Auto Buy Blocked", "CommF_ not ready", "Wait for game to finish loading, then try again.")
+		return false
+	end
+	if RaidHasTimer() or RaidOnAnyIsland() then
+		RaidSetDiag("warn", "Auto Buy Waiting", "Raid already running", "Wait until the raid timer ends.")
+		return false
+	end
+	if RaidHasChip() then
+		RaidSetDiag("ok", "Auto Buy Done", "Microchip already in inventory", "Enable Auto Start Raid next.")
+		Raid.buyPhase = "idle"
+		return true
+	end
+	local blockers = RaidExplainBuyBlockers()
+	for _, reason in blockers do
+		if string.find(reason, "Level") or string.find(reason, "Beli ") or string.find(reason, "No fruit")
+			or string.find(reason, "No raid") or string.find(reason, "Sea ") or string.find(reason, "CommF")
+			or string.find(reason, "already have") or string.find(reason, "already active")
+		then
+			RaidSetDiag("error", "Auto Buy Blocked", reason, table.concat(blockers, "\n"))
+			return false
+		end
+	end
+	local labCf = RaidGetLabCFrame()
+	if not labCf then
+		RaidSetDiag("error", "Auto Buy Blocked", "Raid lab not found", "Could not locate laboratory on this sea.")
+		return false
+	end
+	if not RaidNearLab() then
+		Raid.buyPhase = "to_lab"
+		RaidFlyTo(labCf, "raid_lab", RAID_CFG.LAB_SPEED)
+		RaidSetDiag("busy", "Auto Buy", "Flying to raid laboratory...", "Chip purchase only works at the lab NPC.")
+		return false
+	end
+	clearMovement("raid_lab")
+	Raid.buyPhase = "purchase"
+	local hrp = getRootPart()
+	if hrp then
+		hrp.CFrame = labCf
+		if movementTweenPart then
+			movementTweenPart.CFrame = labCf
+		end
 	end
 	if Raid.buyFruit then
 		local fruitName, fruitValue = RaidGetLowestFruit()
 		if not fruitName then
-			Raid.status = RaidIsAdvanced(Raid.selected)
-				and "Buy: need a fruit worth 1M+ in storage"
-				or "Buy: no eligible fruit in bag"
+			RaidSetDiag("error", "Auto Buy Blocked", "No eligible fruit", table.concat(RaidExplainBuyBlockers(), "\n"))
 			return false
 		end
 		if not RaidHasFruitNamed(fruitName) then
 			if Raid.pendingFruit ~= fruitName or tick() - Raid.fruitLoadAt >= 1.5 then
 				Raid.pendingFruit = fruitName
 				Raid.fruitLoadAt = tick()
-				Raid.status = string.format("Buy: loading %s ($%s) from storage...", fruitName, tostring(fruitValue or "?"))
 				invokeCommF("LoadFruit", fruitName)
+				RaidSetDiag("busy", "Auto Buy", "Pulling fruit from storage...", string.format("%s ($%s)", fruitName, tostring(fruitValue or "?")))
 			else
-				Raid.status = string.format("Buy: waiting for %s to appear in bag...", fruitName)
+				RaidSetDiag("busy", "Auto Buy", "Waiting for fruit to load...", fruitName)
 			end
 			return false
 		end
 		Raid.pendingFruit = nil
 		RaidEquipFruitNamed(fruitName)
-		invokeCommF("RaidsNpc", "Select", Raid.selected)
+	elseif Raid.buyBeli then
+		RaidUnequipAll()
 	end
+	local now = tick()
+	if now - Raid.lastBuyInvoke < 1 then
+		RaidSetDiag("busy", "Auto Buy", "Talking to raid NPC...", "Waiting for server response...")
+		return false
+	end
+	Raid.lastBuyInvoke = now
+	local okInvoke, invokeResult = RaidInvokeChipSelect()
 	if RaidHasChip() then
-		Raid.status = "Buy: microchip acquired"
+		Raid.buyPhase = "idle"
+		RaidSetDiag("ok", "Auto Buy Success", "Microchip acquired", "You can now enable Auto Start Raid.")
 		return true
 	end
+	local detail = "Sent RaidsNpc Select for " .. tostring(Raid.selected)
 	if Raid.buyBeli then
-		Raid.status = "Buy: purchasing chip (need 100k beli + lvl 1100)..."
+		detail = detail .. ". Beli mode: no fruit equipped, server charges 100k beli at lvl 1100+."
 	elseif Raid.buyFruit then
-		Raid.status = "Buy: fruit payment pending..."
-	else
-		Raid.status = "Buy: enable Beli or Fruit toggle"
+		detail = detail .. " using lowest fruit in bag."
 	end
+	if not okInvoke then
+		detail = tostring(invokeResult) .. "\n" .. detail
+	end
+	if invokeResult and type(invokeResult) == "string" and invokeResult ~= "" then
+		detail = "Server: " .. invokeResult .. "\n" .. detail
+	end
+	local blockersNow = RaidExplainBuyBlockers()
+	if #blockersNow > 0 then
+		detail = table.concat(blockersNow, "\n") .. "\n" .. detail
+	end
+	RaidSetDiag("warn", "Auto Buy Retrying", "Chip not received yet", detail)
 	return false
 end
 local function RaidFlyTo(cf, owner, speed)
@@ -1516,7 +1730,7 @@ end
 local function RaidStart()
 	if not Raid.autoStart then return false end
 	if not RaidHasChip() then
-		Raid.status = "Start: need microchip in inventory"
+		RaidSetDiag("error", "Auto Start Blocked", "No microchip in inventory", "Enable Auto Buy Chip first.")
 		return false
 	end
 	if RaidHasTimer() then return false end
@@ -1525,7 +1739,7 @@ local function RaidStart()
 	if now - Raid.startAt < RAID_CFG.START_DELAY then return false end
 	local padCf, detector = RaidGetPad()
 	if not padCf then
-		Raid.status = "Start: raid pad not found (go to Sea 2/3)"
+		RaidSetDiag("error", "Auto Start Blocked", "Raid pad not found", "Make sure you are on Sea 2 or Sea 3.")
 		return false
 	end
 	local hrp = getRootPart()
@@ -1533,17 +1747,17 @@ local function RaidStart()
 	local dist = (hrp.Position - padCf.Position).Magnitude
 	if dist > RAID_CFG.PAD_NEAR then
 		RaidFlyTo(padCf, "raid_pad", RAID_CFG.PAD_SPEED)
-		Raid.status = "Start: flying to raid pad..."
+		RaidSetDiag("busy", "Auto Start", "Flying to raid summon pad...", "Equip chip happens automatically at the pad.")
 		return false
 	end
 	clearMovement("raid_pad")
 	Raid.startAt = now
 	RaidEquipChip()
 	if not RaidClickPad(detector) then
-		Raid.status = "Start: could not click raid pad"
+		RaidSetDiag("error", "Auto Start Blocked", "Could not click raid pad", "Your executor may need fireclickdetector support.")
 		return false
 	end
-	Raid.status = "Start: pad clicked â€” waiting for Island 1..."
+	RaidSetDiag("busy", "Auto Start", "Pad clicked - entering raid...", "Waiting for Island 1 to spawn.")
 	return true
 end
 local function RaidGetNetRemotes()
@@ -1668,7 +1882,7 @@ local function RaidAttackMobs(mobs)
 	if #mobs == 0 then return end
 	local tool = RaidEquipWeapon()
 	if not tool then
-		Raid.status = "Combat: equip a " .. tostring(attackSettings.weaponType) .. " weapon"
+		RaidSetDiag("error", "Auto Complete Blocked", "Equip a " .. tostring(attackSettings.weaponType) .. " weapon", "Open A-Set tab and pick your weapon type.")
 		return
 	end
 	local hitList, primaryHit = {}, nil
@@ -1685,7 +1899,7 @@ local function RaidAttackMobs(mobs)
 	if #hitList == 0 or not primaryHit then return end
 	local registerAttack, registerHit = RaidGetNetRemotes()
 	if not registerAttack or not registerHit then
-		Raid.status = "Combat: attack remotes missing"
+		RaidSetDiag("error", "Auto Complete Blocked", "Attack remotes missing", "Rejoin the server if combat never starts.")
 		return
 	end
 	if tool.ToolTip == "Blox Fruit" then
@@ -1730,9 +1944,9 @@ local function RaidRunCombat(dt)
 	end
 	local mobs = RaidGetMobs(islandPart)
 	if #mobs == 0 then
-		Raid.status = islandIndex > 0
-			and string.format("Combat: island %d clear â€” scanning...", islandIndex)
-			or "Combat: waiting for raid islands..."
+		RaidSetDiag("busy", "Auto Complete", islandIndex > 0
+			and string.format("Island %d clear - scanning next...", islandIndex)
+			or "Waiting for raid islands...", "")
 		return
 	end
 	RaidBringMobs(mobs, dt)
@@ -1742,7 +1956,7 @@ local function RaidRunCombat(dt)
 		Raid.attackAccum = 0
 		RaidAttackMobs(mobs)
 	end
-	Raid.status = string.format("Combat: island %d | %d mobs", islandIndex, #mobs)
+	RaidSetDiag("ok", "Auto Complete", string.format("Fighting island %d (%d mobs)", islandIndex, #mobs), "Weapon: " .. attackSettings.weaponType .. " | Mode: " .. attackSettings.attackMode)
 end
 local function RaidTryAwaken()
 	if not Raid.autoAwaken or RaidHasTimer() or RaidOnAnyIsland() then return end
@@ -1756,12 +1970,12 @@ local function RaidUpdateSession()
 		clearMovement("raid_pad")
 		clearMovement("raid")
 		syncMovementPartToPlayer()
-		Raid.status = "Raid started"
+		RaidSetDiag("ok", "Raid Active", "Raid started", Raid.autoComplete and "Auto Complete is running." or "Enable Auto Complete Raid to farm islands.")
 	end
 	if Raid.hadTimer and not timerVisible and not isLoadingMap() and not RaidOnAnyIsland() then
 		Raid.cycles += 1
 		RaidCleanup()
-		Raid.status = "Raid finished â€” cycle #" .. tostring(Raid.cycles)
+		RaidSetDiag("ok", "Raid Finished", "Cycle #" .. tostring(Raid.cycles) .. " complete", Raid.autoAwaken and "Auto Awaken sent." or "")
 		RaidTryAwaken()
 	end
 	Raid.hadTimer = timerVisible
@@ -1775,7 +1989,7 @@ local function RaidTick(dt)
 	RaidUpdateSession()
 	if RaidHasTimer() then
 		if not Raid.autoComplete then
-			Raid.status = "Raid in progress (enable Auto Complete Raid)"
+			RaidSetDiag("warn", "Raid Active", "Raid timer running", "Enable Auto Complete Raid to auto-farm islands.")
 		end
 		return
 	end
@@ -1794,9 +2008,10 @@ local function RaidTick(dt)
 		end
 		return
 	end
-	if Raid.selected and not Raid.buyBeli and not Raid.buyFruit and not Raid.autoStart then
-		Raid.status = "Enable buy chip, auto start, or auto complete"
+	if Raid.selected and not Raid.buyBeli and not Raid.buyFruit and not Raid.autoStart and not Raid.autoComplete then
+		RaidSetDiag("idle", "Raid Ready", "Select options to begin", "Pick a raid, then enable buy / start / complete.")
 	end
+	RaidRefreshDiagUI()
 end
 local function shouldDeferFruitAutomation()
 	if isLoadingMap() then return true end
@@ -2232,7 +2447,7 @@ titleLabel.Size = UDim2.new(1, -130, 1, 0)
 btnMinimize = makeButton(titleBar, "â€”", COLORS.surfaceAlt, UDim2.fromOffset(30, 30)); btnMinimize.Position = UDim2.new(1, -100, 0.5, -15); btnMinimize.ZIndex = 3
 btnHide = makeButton(titleBar, "â–", COLORS.surfaceAlt, UDim2.fromOffset(30, 30)); btnHide.Position = UDim2.new(1, -66, 0.5, -15); btnHide.ZIndex = 3; btnHide.Text = "âˆ’"
 btnUnload = makeButton(titleBar, "Ã—", COLORS.danger, UDim2.fromOffset(30, 30)); btnUnload.Position = UDim2.new(1, -32, 0.5, -15); btnUnload.ZIndex = 3; btnUnload.TextSize = 18
-body = Instance.new("Frame"); body.Name = "Body"; body.Size = UDim2.new(1, -20, 1, -58); body.Position = UDim2.fromOffset(10, 52); body.BackgroundTransparency = 1; body.ClipsDescendants = true; body.Parent = mainFrame
+body = Instance.new("Frame"); body.Name = "Body"; body.Size = UDim2.new(1, -20, 1, -(58 + DIAG_PANEL_H + 8)); body.Position = UDim2.fromOffset(10, 52); body.BackgroundTransparency = 1; body.ClipsDescendants = true; body.Parent = mainFrame
 local sidebar = Instance.new("Frame"); sidebar.Name = "Sidebar"; sidebar.Size = UDim2.new(0, SIDEBAR_W, 1, 0); sidebar.BackgroundColor3 = COLORS.surface; sidebar.BorderSizePixel = 0; sidebar.ZIndex = 2; sidebar.Parent = body
 makeCorner(sidebar, CORNER_RADIUS)
 makeStroke(sidebar, COLORS.stroke, 1)
@@ -2295,12 +2510,22 @@ btnMarines = makeButton(teamsCard, "âš“  Join Marines", COLORS.marine, UDim2
 makeCorner(btnMarines, 8)
 bindHover(btnMarines, COLORS.marine, Color3.fromRGB(95, 155, 245))
 teamStatusLabel = Instance.new("TextLabel"); teamStatusLabel.Name = "TeamStatus"; teamStatusLabel.Size = UDim2.new(1, 0, 0, 44); teamStatusLabel.Position = UDim2.fromOffset(0, 168); teamStatusLabel.BackgroundTransparency = 1; teamStatusLabel.Font = Enum.Font.Code; teamStatusLabel.TextSize = 11; teamStatusLabel.TextXAlignment = Enum.TextXAlignment.Left; teamStatusLabel.TextYAlignment = Enum.TextYAlignment.Top; teamStatusLabel.TextWrapped = true; teamStatusLabel.TextColor3 = COLORS.textMuted; teamStatusLabel.Text = "Current team: " .. getCurrentTeamLabel(); teamStatusLabel.Parent = teamsCard
-raidSelectBtn = makeButton(raidsScroll, "Select Raid", COLORS.accent, UDim2.new(1, 0, 0, 34)); raidSelectBtn.LayoutOrder = 1; raidSelectBtn.TextSize = 12
-raidSelectedLabel = Instance.new("TextLabel"); raidSelectedLabel.Size = UDim2.new(1, 0, 0, 28); raidSelectedLabel.BackgroundTransparency = 1; raidSelectedLabel.Font = Enum.Font.Gotham; raidSelectedLabel.TextSize = 11; raidSelectedLabel.TextXAlignment = Enum.TextXAlignment.Left; raidSelectedLabel.TextColor3 = COLORS.textMuted; raidSelectedLabel.Text = RaidIsSeaValid() and "Selected: none" or "Raids only on Sea 2 / Sea 3"; raidSelectedLabel.LayoutOrder = 2; raidSelectedLabel.Parent = raidsScroll
-raidMenu = Instance.new("Frame"); raidMenu.Name = "RaidMenu"; raidMenu.Size = UDim2.new(1, 0, 0, 0); raidMenu.BackgroundColor3 = COLORS.surface; raidMenu.BorderSizePixel = 0; raidMenu.Visible = false; raidMenu.LayoutOrder = 3; raidMenu.Parent = raidsScroll
+local raidHeaderCard = Instance.new("Frame"); raidHeaderCard.Name = "RaidHeader"; raidHeaderCard.Size = UDim2.new(1, 0, 0, 72); raidHeaderCard.BackgroundColor3 = COLORS.surface; raidHeaderCard.BorderSizePixel = 0; raidHeaderCard.LayoutOrder = 1; raidHeaderCard.Parent = raidsScroll
+makeCorner(raidHeaderCard, 10)
+makeStroke(raidHeaderCard, COLORS.stroke, 1)
+local raidHeaderPad = Instance.new("UIPadding"); raidHeaderPad.PaddingTop = UDim.new(0, 10); raidHeaderPad.PaddingBottom = UDim.new(0, 10); raidHeaderPad.PaddingLeft = UDim.new(0, 12); raidHeaderPad.PaddingRight = UDim.new(0, 12); raidHeaderPad.Parent = raidHeaderCard
+local raidHeaderTitle = Instance.new("TextLabel"); raidHeaderTitle.Size = UDim2.new(1, 0, 0, 20); raidHeaderTitle.BackgroundTransparency = 1; raidHeaderTitle.Font = Enum.Font.GothamBold; raidHeaderTitle.TextSize = 14; raidHeaderTitle.TextXAlignment = Enum.TextXAlignment.Left; raidHeaderTitle.TextColor3 = COLORS.text; raidHeaderTitle.Text = "Raid Automation"; raidHeaderTitle.Parent = raidHeaderCard
+local raidHeaderSub = Instance.new("TextLabel"); raidHeaderSub.Size = UDim2.new(1, 0, 0, 30); raidHeaderSub.Position = UDim2.fromOffset(0, 22); raidHeaderSub.BackgroundTransparency = 1; raidHeaderSub.Font = Enum.Font.Gotham; raidHeaderSub.TextSize = 10; raidHeaderSub.TextWrapped = true; raidHeaderSub.TextXAlignment = Enum.TextXAlignment.Left; raidHeaderSub.TextYAlignment = Enum.TextYAlignment.Top; raidHeaderSub.TextColor3 = COLORS.textMuted; raidHeaderSub.Text = "Premium raid flow inspired by Redz: buy chip at lab, start at pad, auto-complete islands."; raidHeaderSub.Parent = raidHeaderCard
+raidStatsLabel = Instance.new("TextLabel"); raidStatsLabel.Name = "RaidStats"; raidStatsLabel.Size = UDim2.new(1, 0, 0, 22); raidStatsLabel.BackgroundColor3 = COLORS.surfaceAlt; raidStatsLabel.BorderSizePixel = 0; raidStatsLabel.Font = Enum.Font.Code; raidStatsLabel.TextSize = 10; raidStatsLabel.TextXAlignment = Enum.TextXAlignment.Left; raidStatsLabel.TextColor3 = COLORS.accent; raidStatsLabel.Text = RaidGetLiveStatsText(); raidStatsLabel.LayoutOrder = 2; raidStatsLabel.Parent = raidsScroll
+makeCorner(raidStatsLabel)
+local raidStatsPad = Instance.new("UIPadding"); raidStatsPad.PaddingTop = UDim.new(0, 4); raidStatsPad.PaddingBottom = UDim.new(0, 4); raidStatsPad.PaddingLeft = UDim.new(0, 10); raidStatsPad.PaddingRight = UDim.new(0, 10); raidStatsPad.Parent = raidStatsLabel
+raidSelectBtn = makeButton(raidsScroll, "Select Raid", COLORS.accent, UDim2.new(1, 0, 0, 34)); raidSelectBtn.LayoutOrder = 3; raidSelectBtn.TextSize = 12
+raidSelectedLabel = Instance.new("TextLabel"); raidSelectedLabel.Size = UDim2.new(1, 0, 0, 24); raidSelectedLabel.BackgroundTransparency = 1; raidSelectedLabel.Font = Enum.Font.Gotham; raidSelectedLabel.TextSize = 11; raidSelectedLabel.TextXAlignment = Enum.TextXAlignment.Left; raidSelectedLabel.TextColor3 = COLORS.textMuted; raidSelectedLabel.Text = RaidIsSeaValid() and "Selected: none" or "Raids only on Sea 2 / Sea 3"; raidSelectedLabel.LayoutOrder = 4; raidSelectedLabel.Parent = raidsScroll
+raidMenu = Instance.new("Frame"); raidMenu.Name = "RaidMenu"; raidMenu.Size = UDim2.new(1, 0, 0, 0); raidMenu.BackgroundColor3 = COLORS.surface; raidMenu.BorderSizePixel = 0; raidMenu.Visible = false; raidMenu.LayoutOrder = 5; raidMenu.Parent = raidsScroll
 makeCorner(raidMenu)
 raidMenuLayout = Instance.new("UIListLayout"); raidMenuLayout.SortOrder = Enum.SortOrder.LayoutOrder; raidMenuLayout.Padding = UDim.new(0, 4); raidMenuLayout.Parent = raidMenu
 local raidMenuPad = Instance.new("UIPadding"); raidMenuPad.PaddingTop = UDim.new(0, 8); raidMenuPad.PaddingBottom = UDim.new(0, 8); raidMenuPad.PaddingLeft = UDim.new(0, 8); raidMenuPad.PaddingRight = UDim.new(0, 8); raidMenuPad.Parent = raidMenu
+local raidAutoTitle = Instance.new("TextLabel"); raidAutoTitle.Size = UDim2.new(1, 0, 0, 18); raidAutoTitle.BackgroundTransparency = 1; raidAutoTitle.Font = Enum.Font.GothamBold; raidAutoTitle.TextSize = 11; raidAutoTitle.TextXAlignment = Enum.TextXAlignment.Left; raidAutoTitle.TextColor3 = COLORS.textMuted; raidAutoTitle.Text = "AUTOMATION"; raidAutoTitle.LayoutOrder = 6; raidAutoTitle.Parent = raidsScroll
 local toggleBuyBeli = createToggleRow(raidsScroll, "Auto Buy Chip (Beli)", false, function(v)
 	Raid.buyBeli = v
 	if v and Raid.buyFruit then
@@ -2309,11 +2534,12 @@ local toggleBuyBeli = createToggleRow(raidsScroll, "Auto Buy Chip (Beli)", false
 	end
 	if v then
 		Raid.pendingFruit = nil
+		Raid.lastBuyInvoke = 0
 		ensureMovementTweenPart()
 		RaidUnequipAll()
-		Raid.status = "Beli buy ON - needs 100k beli + lvl 1100"
+		RaidSetDiag("busy", "Auto Buy", "Beli buy enabled", "Needs lvl 1100+, 100k beli, Sea 2/3, and raid lab.")
 	end
-end, 4)
+end, 7)
 local toggleBuyFruit = createToggleRow(raidsScroll, "Auto Buy Chip (Fruit)", false, function(v)
 	Raid.buyFruit = v
 	if v and Raid.buyBeli then
@@ -2321,26 +2547,30 @@ local toggleBuyFruit = createToggleRow(raidsScroll, "Auto Buy Chip (Fruit)", fal
 		toggleBuyBeli.Set(false, true)
 	end
 	if v then
+		Raid.lastBuyInvoke = 0
 		ensureMovementTweenPart()
 		local fruitName, fruitValue = RaidGetLowestFruit()
 		if fruitName then
-			Raid.status = string.format("Fruit buy ON - lowest: %s ($%s)", fruitName, tostring(fruitValue or "?"))
+			RaidSetDiag("busy", "Auto Buy", "Fruit buy enabled", string.format("Using lowest fruit: %s ($%s)", fruitName, tostring(fruitValue or "?")))
 		else
-			Raid.status = "Fruit buy ON - no eligible fruit in bag yet"
+			RaidSetDiag("warn", "Auto Buy", "Fruit buy enabled", "No eligible fruit found yet - check storage/backpack.")
 		end
 	else
 		Raid.pendingFruit = nil
 	end
-end, 5)
+end, 8)
 local toggleAutoStart = createToggleRow(raidsScroll, "Auto Start Raid", false, function(v)
 	Raid.autoStart = v
 	if v then
 		ensureMovementTweenPart()
 		Raid.startAt = 0
+		if not RaidHasChip() then
+			RaidSetDiag("warn", "Auto Start", "Waiting for microchip", "Enable Auto Buy Chip first.")
+		end
 	else
 		clearMovement("raid_pad")
 	end
-end, 6)
+end, 9)
 local toggleAutoComplete = createToggleRow(raidsScroll, "Auto Complete Raid", false, function(v)
 	Raid.autoComplete = v
 	if v then
@@ -2350,16 +2580,13 @@ local toggleAutoComplete = createToggleRow(raidsScroll, "Auto Complete Raid", fa
 	else
 		RaidCleanup()
 	end
-end, 7)
+end, 10)
 createToggleRow(raidsScroll, "Auto Awaken Fruit", false, function(v)
 	Raid.autoAwaken = v
-end, 8)
-raidStatusLabel = Instance.new("TextLabel"); raidStatusLabel.Size = UDim2.new(1, 0, 0, 96); raidStatusLabel.BackgroundColor3 = COLORS.surface; raidStatusLabel.BackgroundTransparency = 0; raidStatusLabel.BorderSizePixel = 0; raidStatusLabel.Font = Enum.Font.Code; raidStatusLabel.TextSize = 10; raidStatusLabel.TextXAlignment = Enum.TextXAlignment.Left; raidStatusLabel.TextYAlignment = Enum.TextYAlignment.Top; raidStatusLabel.TextWrapped = true; raidStatusLabel.TextColor3 = COLORS.textMuted; raidStatusLabel.Text = Raid.status; raidStatusLabel.LayoutOrder = 9; raidStatusLabel.Parent = raidsScroll
+end, 11)
+raidStatusLabel = Instance.new("TextLabel"); raidStatusLabel.Size = UDim2.new(1, 0, 0, 36); raidStatusLabel.BackgroundColor3 = COLORS.surface; raidStatusLabel.BackgroundTransparency = 0; raidStatusLabel.BorderSizePixel = 0; raidStatusLabel.Font = Enum.Font.Gotham; raidStatusLabel.TextSize = 10; raidStatusLabel.TextXAlignment = Enum.TextXAlignment.Left; raidStatusLabel.TextYAlignment = Enum.TextYAlignment.Top; raidStatusLabel.TextWrapped = true; raidStatusLabel.TextColor3 = COLORS.textMuted; raidStatusLabel.Text = "Status updates appear in the bottom panel."; raidStatusLabel.LayoutOrder = 12; raidStatusLabel.Parent = raidsScroll
 makeCorner(raidStatusLabel)
 local raidStatusPad = Instance.new("UIPadding"); raidStatusPad.PaddingTop = UDim.new(0, 8); raidStatusPad.PaddingLeft = UDim.new(0, 8); raidStatusPad.PaddingRight = UDim.new(0, 8); raidStatusPad.Parent = raidStatusLabel
-local raidInfo = Instance.new("TextLabel"); raidInfo.Size = UDim2.new(1, 0, 0, 56); raidInfo.BackgroundColor3 = COLORS.surface; raidInfo.BorderSizePixel = 0; raidInfo.Font = Enum.Font.Gotham; raidInfo.TextSize = 10; raidInfo.TextWrapped = true; raidInfo.TextXAlignment = Enum.TextXAlignment.Left; raidInfo.TextYAlignment = Enum.TextYAlignment.Top; raidInfo.TextColor3 = COLORS.textMuted; raidInfo.Text = "Flow: select raid -> buy chip -> fly to pad & start -> auto complete islands. Use A-Set tab for weapon/attack speed."; raidInfo.LayoutOrder = 10; raidInfo.Parent = raidsScroll
-makeCorner(raidInfo)
-local raidInfoPad = Instance.new("UIPadding"); raidInfoPad.PaddingTop = UDim.new(0, 8); raidInfoPad.PaddingLeft = UDim.new(0, 8); raidInfoPad.PaddingRight = UDim.new(0, 8); raidInfoPad.Parent = raidInfo
 createSegmentedControl(aSettingsScroll, "Weapon", { "Melee", "Sword", "Fruit", "Gun" }, "Melee", function(value)
 	attackSettings.weaponType = value
 end, 1)
@@ -2541,7 +2768,7 @@ local function rebuildRaidMenu()
 			pick.MouseButton1Click:Connect(function()
 				Raid.selected = raidName
 				raidSelectedLabel.Text = "Selected: " .. raidName
-				Raid.status = "Selected raid: " .. raidName
+				RaidSetDiag("idle", "Raid Ready", "Selected: " .. raidName, "Enable Auto Buy Chip or Auto Start Raid.")
 				raidMenu.Visible = false
 				raidMenu.Size = UDim2.new(1, 0, 0, 0)
 			end)
@@ -2596,6 +2823,15 @@ end)
 local debugFrame = Instance.new("Frame"); debugFrame.Name = "Debug"; debugFrame.Size = UDim2.new(1, 0, 0, 78); debugFrame.BackgroundColor3 = COLORS.surface; debugFrame.BorderSizePixel = 0; debugFrame.LayoutOrder = 99; debugFrame.Parent = playerPanel
 makeCorner(debugFrame, 8)
 debugLabel = Instance.new("TextLabel"); debugLabel.Size = UDim2.new(1, -16, 1, -12); debugLabel.Position = UDim2.fromOffset(8, 6); debugLabel.BackgroundTransparency = 1; debugLabel.Font = Enum.Font.Code; debugLabel.TextSize = 11; debugLabel.TextXAlignment = Enum.TextXAlignment.Left; debugLabel.TextYAlignment = Enum.TextYAlignment.Top; debugLabel.TextWrapped = true; debugLabel.TextColor3 = COLORS.textMuted; debugLabel.Text = "Adjust sliders, then click Apply."; debugLabel.Parent = debugFrame
+diagPanel = Instance.new("Frame"); diagPanel.Name = "DiagPanel"; diagPanel.AnchorPoint = Vector2.new(0, 1); diagPanel.Position = UDim2.new(0, 10, 1, -6); diagPanel.Size = UDim2.new(1, -20, 0, DIAG_PANEL_H); diagPanel.BackgroundColor3 = COLORS.surface; diagPanel.BorderSizePixel = 0; diagPanel.ZIndex = 4; diagPanel.Parent = mainFrame
+makeCorner(diagPanel, 8)
+makeStroke(diagPanel, COLORS.stroke, 1)
+diagAccent = Instance.new("Frame"); diagAccent.Name = "Accent"; diagAccent.Size = UDim2.new(0, 4, 1, -12); diagAccent.Position = UDim2.fromOffset(8, 6); diagAccent.BackgroundColor3 = COLORS.textMuted; diagAccent.BorderSizePixel = 0; diagAccent.ZIndex = 5; diagAccent.Parent = diagPanel
+makeCorner(diagAccent, 2)
+diagTitleLabel = Instance.new("TextLabel"); diagTitleLabel.Name = "Title"; diagTitleLabel.Size = UDim2.new(1, -24, 0, 16); diagTitleLabel.Position = UDim2.fromOffset(18, 6); diagTitleLabel.BackgroundTransparency = 1; diagTitleLabel.Font = Enum.Font.GothamBold; diagTitleLabel.TextSize = 11; diagTitleLabel.TextXAlignment = Enum.TextXAlignment.Left; diagTitleLabel.TextColor3 = COLORS.textMuted; diagTitleLabel.Text = Raid.diagTitle; diagTitleLabel.ZIndex = 5; diagTitleLabel.Parent = diagPanel
+diagMessageLabel = Instance.new("TextLabel"); diagMessageLabel.Name = "Message"; diagMessageLabel.Size = UDim2.new(1, -24, 0, 18); diagMessageLabel.Position = UDim2.fromOffset(18, 22); diagMessageLabel.BackgroundTransparency = 1; diagMessageLabel.Font = Enum.Font.Gotham; diagMessageLabel.TextSize = 11; diagMessageLabel.TextXAlignment = Enum.TextXAlignment.Left; diagMessageLabel.TextTruncate = Enum.TextTruncate.AtEnd; diagMessageLabel.TextColor3 = COLORS.text; diagMessageLabel.Text = Raid.diagMessage; diagMessageLabel.ZIndex = 5; diagMessageLabel.Parent = diagPanel
+diagDetailLabel = Instance.new("TextLabel"); diagDetailLabel.Name = "Detail"; diagDetailLabel.Size = UDim2.new(1, -24, 0, 18); diagDetailLabel.Position = UDim2.fromOffset(18, 40); diagDetailLabel.BackgroundTransparency = 1; diagDetailLabel.Font = Enum.Font.Code; diagDetailLabel.TextSize = 9; diagDetailLabel.TextXAlignment = Enum.TextXAlignment.Left; diagDetailLabel.TextTruncate = Enum.TextTruncate.AtEnd; diagDetailLabel.TextColor3 = COLORS.textMuted; diagDetailLabel.Text = Raid.diagDetail; diagDetailLabel.ZIndex = 5; diagDetailLabel.Parent = diagPanel
+RaidRefreshDiagUI()
 reopenGui = Instance.new("ScreenGui"); reopenGui.Name = "PlayerSettingsGUI_ToggleGui"; reopenGui.ResetOnSpawn = false; reopenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global; reopenGui.DisplayOrder = 10001; reopenGui.IgnoreGuiInset = true; reopenGui.Enabled = true
 protectGui(reopenGui)
 parentGui(reopenGui)
@@ -2639,9 +2875,10 @@ connect(RunService.Heartbeat, function()
 	pcall(runIslandTeleport)
 	pcall(runFruitAutomation)
 	pcall(RaidTick)
-	if raidStatusLabel then
-		raidStatusLabel.Text = Raid.status
+	if raidStatsLabel then
+		raidStatsLabel.Text = RaidGetLiveStatsText()
 	end
+	RaidRefreshDiagUI()
 	updateDebug()
 end)
 connect(LocalPlayer.CharacterAdded, function()
@@ -2701,9 +2938,10 @@ raidsTab.MouseButton1Click:Connect(function()
 		raidSelectedLabel.Text = (Raid.selected and ("Selected: " .. Raid.selected))
 			or (RaidIsSeaValid() and "Selected: none" or "Raids only on Sea 2 / Sea 3")
 	end
-	if raidStatusLabel then
-		raidStatusLabel.Text = Raid.status
+	if raidStatsLabel then
+		raidStatsLabel.Text = RaidGetLiveStatsText()
 	end
+	RaidRefreshDiagUI()
 end)
 aSettingsTab.MouseButton1Click:Connect(function()
 	switchTab("A-Settings")
