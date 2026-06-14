@@ -116,6 +116,7 @@ local HubDebug = {
 	logLabel = nil,
 	logScroll = nil,
 	statusLabel = nil,
+	reportBox = nil,
 	lastVarAt = 0,
 	varInterval = 2.5,
 }
@@ -437,23 +438,80 @@ local function HubDebugBuildReport()
 	end
 	return table.concat(lines, "\n")
 end
+local function copyTextToClipboard(text)
+	if not text or text == "" then return false end
+	local attempts = {
+		function()
+			if typeof(setclipboard) == "function" then
+				setclipboard(text)
+				return true
+			end
+		end,
+		function()
+			if typeof(toclipboard) == "function" then
+				toclipboard(text)
+				return true
+			end
+		end,
+		function()
+			if typeof(writeclipboard) == "function" then
+				writeclipboard(text)
+				return true
+			end
+		end,
+		function()
+			if syn and syn.clipboard then
+				if typeof(syn.clipboard.copy) == "function" then
+					syn.clipboard.copy(text)
+					return true
+				end
+				if typeof(syn.clipboard.set) == "function" then
+					syn.clipboard.set(text, true)
+					return true
+				end
+			end
+		end,
+		function()
+			if clipboard and typeof(clipboard.set) == "function" then
+				clipboard.set(text)
+				return true
+			end
+		end,
+		function()
+			if clip_board and typeof(clip_board.set) == "function" then
+				clip_board.set(text)
+				return true
+			end
+		end,
+	}
+	for _, attempt in attempts do
+		local ok, result = pcall(attempt)
+		if ok and result == true then
+			return true
+		end
+	end
+	return false
+end
 local function HubDebugCopyReport()
 	local text = HubDebugBuildReport()
-	local copied = false
-	if typeof(setclipboard) == "function" then
-		copied = pcall(setclipboard, text)
-	elseif typeof(toclipboard) == "function" then
-		copied = pcall(toclipboard, text)
-	elseif typeof(writeclipboard) == "function" then
-		copied = pcall(writeclipboard, text)
+	local copied = copyTextToClipboard(text)
+	if not copied and HubDebug.reportBox then
+		HubDebug.reportBox.Text = text
+		HubDebug.reportBox.Visible = true
+		pcall(function()
+			HubDebug.reportBox:CaptureFocus()
+			HubDebug.reportBox.CursorPosition = #text
+		end)
 	end
 	if HubDebug.statusLabel then
 		HubDebug.statusLabel.Text = copied
-			and "Report copied to clipboard. Paste it in chat for the developer."
-			or "Clipboard API missing — select log text manually."
+			and "Report copied to clipboard. Paste it in chat."
+			or "Clipboard unavailable — full report opened below. Press Ctrl+A then Ctrl+C."
 		HubDebug.statusLabel.TextColor3 = copied and COLORS.success or COLORS.warn
 	end
-	HubDebug.Log("SYS", copied and "Report copied to clipboard" or "Copy failed — no clipboard API")
+	if HubDebug.enabled then
+		HubDebug.Log("SYS", copied and "Report copied to clipboard" or "Copy used manual report box fallback")
+	end
 	return copied, text
 end
 local function tween(instance, props, info) return TweenService:Create(instance, info or TWEEN_INFO, props) end
@@ -1805,7 +1863,10 @@ local CHIP_FRUIT_VALUES = {
 	["Blade-Blade"] = 30000, ["Smoke-Smoke"] = 100000, ["Bomb-Bomb"] = 80000,
 	["Spike-Spike"] = 180000, ["Chop-Chop"] = 30000, ["Barrier-Barrier"] = 80000,
 	["Love-Love"] = 1300000, ["Rubber-Rubber"] = 750000, ["Ghost-Ghost"] = 940000,
+	["Sand-Sand"] = 420000, ["Flame-Flame"] = 250000, ["Dark-Dark"] = 580000,
+	["Ice-Ice"] = 350000, ["Light-Light"] = 650000, ["Magma-Magma"] = 850000,
 }
+local RaidFruitInventoryMeta = {}
 local function resolveSendHits()
 	if sendHitsToServer then return sendHitsToServer end
 	if typeof(getsenv) == "function" then
@@ -1905,8 +1966,12 @@ local function RaidGetLowestFruit()
 	local ok, inv = invokeCommF("getInventory")
 	if ok and type(inv) == "table" then
 		for _, entry in pairs(inv) do
-			if type(entry) == "table" and entry.Type == "Blox Fruit" then
-				consider(entry.Name or entry.FruitName, entry.Value or entry.Price)
+			if type(entry) == "table" and (entry.Type == "Blox Fruit" or entry.Type == "Devil Fruit" or entry.FruitName) then
+				local name = entry.Name or entry.FruitName or entry.DisplayName
+				if name then
+					RaidFruitInventoryMeta[name] = entry
+					consider(name, entry.Value or entry.Price)
+				end
 			end
 		end
 	end
@@ -1928,6 +1993,40 @@ local function RaidGetLowestFruit()
 		end
 	end
 	return bestName, bestValue
+end
+local function RaidGetFruitLoadCandidates(fruitName)
+	local candidates, seen = {}, {}
+	local function add(name)
+		if type(name) == "string" and name ~= "" and not seen[name] then
+			seen[name] = true
+			table.insert(candidates, name)
+		end
+	end
+	add(fruitName)
+	local meta = RaidFruitInventoryMeta[fruitName]
+	if meta then
+		add(meta.Name)
+		add(meta.DisplayName)
+		add(meta.FruitName)
+	end
+	local base = string.match(fruitName or "", "^([^%-]+)")
+	if base then
+		add(base)
+		add(base .. "-" .. base)
+	end
+	return candidates
+end
+local function RaidTryLoadFruitFromStorage(fruitName)
+	local candidates = RaidGetFruitLoadCandidates(fruitName)
+	if #candidates == 0 then
+		return false, "no candidates"
+	end
+	local idx = ((Raid.fruitLoadAttempt or 0) % #candidates) + 1
+	Raid.fruitLoadAttempt = (Raid.fruitLoadAttempt or 0) + 1
+	local loadAs = candidates[idx]
+	HubDebug.Log("RAID", "LoadFruit -> " .. tostring(loadAs) .. " (try " .. tostring(idx) .. "/" .. tostring(#candidates) .. ")")
+	local ok, result = invokeCommF("LoadFruit", loadAs)
+	return ok, result, loadAs
 end
 local function RaidUnequipAll()
 	local humanoid = getHumanoid()
@@ -1957,7 +2056,7 @@ local function RaidBuyChip()
 		RaidSetDiag("error", "Auto Buy Blocked", "CommF_ not ready", "Wait for game to finish loading, then try again.")
 		return false
 	end
-	if RaidHasRaidTimer() or RaidOnAnyIsland() then
+	if RaidHasTimer() then
 		RaidSetDiag("warn", "Auto Buy Waiting", "Raid already running", "Wait until the raid timer ends.")
 		return false
 	end
@@ -1972,10 +2071,21 @@ local function RaidBuyChip()
 			return false
 		end
 		if not RaidHasFruitNamed(fruitName) then
-			invokeCommF("LoadFruit", fruitName)
-			RaidSetDiag("busy", "Auto Buy", "Pulling fruit from storage...", string.format("%s ($%s)", fruitName, tostring(fruitValue or "?")))
+			Raid.pendingFruit = fruitName
+			local now = tick()
+			if now - (Raid.fruitLoadAt or 0) < 0.35 then
+				return false
+			end
+			Raid.fruitLoadAt = now
+			local ok, result, loadAs = RaidTryLoadFruitFromStorage(fruitName)
+			RaidSetDiag("busy", "Auto Buy", "Pulling fruit from storage...", string.format("%s via LoadFruit(%s)", fruitName, tostring(loadAs or fruitName)))
+			if not ok then
+				RaidSetDiag("warn", "Auto Buy", "LoadFruit failed", tostring(result))
+			end
 			return false
 		end
+		Raid.pendingFruit = nil
+		Raid.fruitLoadAttempt = 0
 		RaidEquipFruitNamed(fruitName)
 	else
 		RaidUnequipAll()
@@ -1994,7 +2104,11 @@ local function RaidBuyChip()
 		RaidSetDiag("ok", "Auto Buy Success", "Microchip acquired", "Enable Auto Start Raid next.")
 		return true
 	end
-	RaidSetDiag("warn", "Auto Buy Retrying", "Chip not received yet", "Sent RaidsNpc Select for " .. tostring(Raid.selected) .. " (retries every 1s like Redz).")
+	local detail = "Sent RaidsNpc Select for " .. tostring(Raid.selected) .. " (retries every 1s)."
+	if Raid.buyBeli then
+		detail = detail .. " Beli cooldown may delay the chip — keep toggle on."
+	end
+	RaidSetDiag("warn", "Auto Buy Retrying", "Chip not received yet", detail)
 	return false
 end
 local function RaidFlyTo(cf, owner, speed)
@@ -2582,15 +2696,15 @@ local function RaidTick(dt)
 		RaidStart()
 		return
 	end
-	if RaidOnAnyIsland() then
-		clearMovement("raid_pad")
-		return
-	end
-	if (Raid.buyBeli or Raid.buyFruit) and not RaidHasChip() then
+	if (Raid.buyBeli or Raid.buyFruit) and not RaidHasChip() and not RaidHasTimer() then
 		if now - Raid.chipBuyAt >= RAID_CFG.CHIP_DELAY then
 			Raid.chipBuyAt = now
 			RaidBuyChip()
 		end
+		return
+	end
+	if RaidHasTimer() and RaidOnAnyIsland() then
+		clearMovement("raid_pad")
 		return
 	end
 	if Raid.selected and not Raid.buyBeli and not Raid.buyFruit and not Raid.autoStart and not Raid.autoComplete then
@@ -3120,6 +3234,8 @@ end)
 HubDebug.logScroll = Instance.new("ScrollingFrame"); HubDebug.logScroll.Name = "DebugLog"; HubDebug.logScroll.Size = UDim2.new(1, 0, 1, -118); HubDebug.logScroll.Position = UDim2.fromOffset(0, 114); HubDebug.logScroll.BackgroundColor3 = COLORS.bg; HubDebug.logScroll.BorderSizePixel = 0; HubDebug.logScroll.ScrollBarThickness = 4; HubDebug.logScroll.ScrollBarImageColor3 = COLORS.accent; HubDebug.logScroll.CanvasSize = UDim2.fromOffset(0, 0); HubDebug.logScroll.Parent = debugPanel
 makeCorner(HubDebug.logScroll, 6)
 HubDebug.logLabel = Instance.new("TextLabel"); HubDebug.logLabel.Name = "LogText"; HubDebug.logLabel.Size = UDim2.new(1, -12, 0, 0); HubDebug.logLabel.Position = UDim2.fromOffset(6, 6); HubDebug.logLabel.BackgroundTransparency = 1; HubDebug.logLabel.Font = Enum.Font.Code; HubDebug.logLabel.TextSize = 9; HubDebug.logLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.logLabel.TextYAlignment = Enum.TextYAlignment.Top; HubDebug.logLabel.TextWrapped = true; HubDebug.logLabel.TextColor3 = COLORS.textMuted; HubDebug.logLabel.AutomaticSize = Enum.AutomaticSize.Y; HubDebug.logLabel.Text = "(empty)"; HubDebug.logLabel.Parent = HubDebug.logScroll
+HubDebug.reportBox = Instance.new("TextBox"); HubDebug.reportBox.Name = "ReportBox"; HubDebug.reportBox.Size = UDim2.new(1, -12, 0, 120); HubDebug.reportBox.Position = UDim2.fromOffset(6, 6); HubDebug.reportBox.BackgroundColor3 = COLORS.surfaceAlt; HubDebug.reportBox.BorderSizePixel = 0; HubDebug.reportBox.ClearTextOnFocus = false; HubDebug.reportBox.MultiLine = true; HubDebug.reportBox.TextEditable = true; HubDebug.reportBox.TextWrapped = true; HubDebug.reportBox.Visible = false; HubDebug.reportBox.Font = Enum.Font.Code; HubDebug.reportBox.TextSize = 8; HubDebug.reportBox.TextColor3 = COLORS.text; HubDebug.reportBox.Text = ""; HubDebug.reportBox.Parent = HubDebug.logScroll
+makeCorner(HubDebug.reportBox, 4)
 btnCopyReport.MouseButton1Click:Connect(function()
 	HubDebugCopyReport()
 end)
@@ -3175,6 +3291,9 @@ local toggleBuyBeli = createToggleRow(raidsScroll, "Auto Buy Chip (Beli)", false
 	end
 	if v then
 		Raid.pendingFruit = nil
+		Raid.fruitLoadAttempt = 0
+		Raid.fruitLoadAt = 0
+		Raid.chipBuyAt = 0
 		Raid.lastBuyInvoke = 0
 		ensureMovementTweenPart()
 		RaidUnequipAll()
@@ -3189,6 +3308,10 @@ local toggleBuyFruit = createToggleRow(raidsScroll, "Auto Buy Chip (Fruit)", fal
 	end
 	if v then
 		Raid.lastBuyInvoke = 0
+		Raid.fruitLoadAttempt = 0
+		Raid.fruitLoadAt = 0
+		Raid.chipBuyAt = 0
+		Raid.pendingFruit = nil
 		ensureMovementTweenPart()
 		local fruitName, fruitValue = RaidGetLowestFruit()
 		if fruitName then
