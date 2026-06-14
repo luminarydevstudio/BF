@@ -127,6 +127,10 @@ local RAID_HITBOX_SIZE = 22
 local RAID_FAST_ATTACK = 0.016
 local RAID_CHIP_BUY_DELAY, RAID_START_DELAY = 1, 1
 local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 180
+local RAID_HOVER_LERP, RAID_HOVER_TRAVEL_LERP = 10, 5.5
+local RAID_MOB_LERP = 12
+local RAID_ISLAND_CLEAR_DELAY = 2.2
+local raidAttackAccum, raidSavedAutoRotate = 0, nil
 local sendHitsToServer = nil
 local fakeHitId = tostring(LocalPlayer.UserId):sub(2, 4) .. "psg"
 local WEAPON_TOOLTIPS = { Melee = "Melee", Sword = "Sword", Fruit = "Blox Fruit", Gun = "Gun" }
@@ -492,6 +496,22 @@ local function cleanupRaidMovement()
 	end
 	if movementFollowOwner == "raid" or movementFollowOwner == "raid_start" then
 		clearMovement(movementFollowOwner)
+	end
+	setCombatHumanoidState(false)
+end
+local function setCombatHumanoidState(active)
+	local humanoid = getHumanoid()
+	if not humanoid then return end
+	if active then
+		if raidSavedAutoRotate == nil then
+			raidSavedAutoRotate = humanoid.AutoRotate
+		end
+		humanoid.AutoRotate = false
+	else
+		if raidSavedAutoRotate ~= nil then
+			humanoid.AutoRotate = raidSavedAutoRotate
+			raidSavedAutoRotate = nil
+		end
 	end
 end
 local function clearMovement(owner)
@@ -1578,11 +1598,33 @@ local function attackAllMobs(mobs)
 	end
 	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
 end
-local function expandRaidMobHitbox(mob, playerHrp)
+local function getRaidHoverCFrame(islandPart)
+	local hoverPos = islandPart.Position + Vector3.new(0, RAID_HOVER_HEIGHT, 0)
+	local lookAt = hoverPos + Vector3.new(0, -RAID_PLAYER_GAP, 0)
+	return CFrame.new(hoverPos, lookAt)
+end
+local function smoothCombatHover(islandPart, dt)
+	local hrp = getRootPart()
+	if not hrp or not islandPart then return end
+	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
+	ensureMovementTweenPart()
+	local targetCf = getRaidHoverCFrame(islandPart)
+	local currentCf = movementTweenPart.CFrame
+	local dist = (currentCf.Position - targetCf.Position).Magnitude
+	local lerpRate = dist > 120 and RAID_HOVER_TRAVEL_LERP or RAID_HOVER_LERP
+	local alpha = 1 - math.exp(-lerpRate * dt)
+	local nextCf = currentCf:Lerp(targetCf, alpha)
+	movementTweenPart.CFrame = nextCf
+	hrp.CFrame = nextCf
+	hrp.AssemblyLinearVelocity = Vector3.zero
+	hrp.AssemblyAngularVelocity = Vector3.zero
+end
+local function expandRaidMobHitbox(mob, playerHrp, dt)
 	if not mob or not playerHrp then return end
 	local head = mob:FindFirstChild("Head")
 	local mobRoot = mob:FindFirstChild("HumanoidRootPart")
 	if not head or not mobRoot then return end
+	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
 	local hitSize = Vector3.new(RAID_HITBOX_SIZE, RAID_HITBOX_SIZE, RAID_HITBOX_SIZE)
 	head.Size = hitSize
 	head.CanCollide = false
@@ -1593,13 +1635,16 @@ local function expandRaidMobHitbox(mob, playerHrp)
 	local towardPlayer = playerHrp.Position - mobRoot.Position
 	if towardPlayer.Magnitude > 0.1 then
 		local reach = math.min(RAID_PLAYER_GAP * 0.9, towardPlayer.Magnitude)
-		head.CFrame = CFrame.new(mobRoot.Position + towardPlayer.Unit * reach)
+		local targetHeadCf = CFrame.new(mobRoot.Position + towardPlayer.Unit * reach)
+		head.CFrame = head.CFrame:Lerp(targetHeadCf, 1 - math.exp(-RAID_MOB_LERP * dt))
 	end
 end
-local function bringMobsUnderPlayer(mobs)
+local function bringMobsUnderPlayer(mobs, dt)
 	local hrp = getRootPart()
 	if not hrp then return end
+	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
 	local anchor = hrp.Position + Vector3.new(0, -RAID_PLAYER_GAP, 0)
+	local mobAlpha = 1 - math.exp(-RAID_MOB_LERP * dt)
 	for index, mob in ipairs(mobs) do
 		if not isAliveMob(mob) then continue end
 		local mobRoot = mob.HumanoidRootPart
@@ -1608,20 +1653,20 @@ local function bringMobsUnderPlayer(mobs)
 		local ring = 6 + ((index - 1) % 4) * 5
 		local offset = Vector3.new(math.cos(angle) * ring, -RAID_BRING_UNDER, math.sin(angle) * ring)
 		local targetPos = anchor + offset
-		mobRoot.CFrame = CFrame.new(targetPos)
 		mobRoot.AssemblyLinearVelocity = Vector3.zero
 		mobRoot.AssemblyAngularVelocity = Vector3.zero
 		local lock = mobRoot:FindFirstChild("PSG_RaidBring")
 		if not lock then
 			lock = Instance.new("BodyPosition")
 			lock.Name = "PSG_RaidBring"
-			lock.MaxForce = Vector3.new(500000, 500000, 500000)
-			lock.P = 14000
-			lock.D = 900
+			lock.MaxForce = Vector3.new(400000, 400000, 400000)
+			lock.P = 4200
+			lock.D = 1400
 			lock.Parent = mobRoot
+			lock.Position = mobRoot.Position
 		end
-		lock.Position = targetPos
-		expandRaidMobHitbox(mob, hrp)
+		lock.Position = lock.Position:Lerp(targetPos, mobAlpha)
+		expandRaidMobHitbox(mob, hrp, dt)
 	end
 end
 local function getRaidMobsNearPlayer(islandPart)
@@ -1641,23 +1686,50 @@ local function getRaidMobsNearPlayer(islandPart)
 	end
 	return results
 end
-local function holdCombatHover(islandPart)
-	local hrp = getRootPart()
-	if not hrp or not islandPart then return end
-	local hoverPos = islandPart.Position + Vector3.new(0, RAID_HOVER_HEIGHT, 0)
-	local lookAt = hrp.Position + Vector3.new(0, -RAID_PLAYER_GAP, 0)
-	hrp.CFrame = CFrame.new(hoverPos, lookAt)
-	hrp.AssemblyLinearVelocity = Vector3.zero
-	hrp.AssemblyAngularVelocity = Vector3.zero
-	if movementTweenPart then movementTweenPart.CFrame = hrp.CFrame end
+local function runRaidCombat(dt)
+	if not autoCompleteRaid then return end
+	if not isRaidActive() and not isNearAnyRaidIsland() then return end
+	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
+	setNoclip(true)
+	setCombatHumanoidState(true)
+	local islandPart = getRaidIslandPartRaw("Island " .. tostring(raidTargetIslandIndex))
+	if islandPart then smoothCombatHover(islandPart, dt) end
+	local mobs = getRaidMobsNearPlayer(islandPart)
+	if #mobs == 0 then
+		if not raidEmptySince then
+			raidEmptySince = tick()
+			lastRaidAction = string.format("Combat: island %d cleared — checking...", raidTargetIslandIndex)
+		elseif tick() - raidEmptySince >= RAID_ISLAND_CLEAR_DELAY then
+			if raidTargetIslandIndex < RAID_ISLAND_COUNT then
+				raidTargetIslandIndex += 1
+				raidEmptySince = nil
+				lastRaidAction = string.format("Traveling smoothly → island %d", raidTargetIslandIndex)
+			else
+				lastRaidAction = "All islands cleared — waiting for finish"
+			end
+		end
+		return
+	end
+	raidEmptySince = nil
+	bringMobsUnderPlayer(mobs, dt)
+	raidAttackAccum += dt
+	local delay = attackSettings.attackMode == "Fast" and RAID_FAST_ATTACK or 0.3
+	if raidAttackAccum >= delay then
+		raidAttackAccum = 0
+		attackAllMobs(mobs)
+	end
+	lastRaidAction = string.format("Combat: island %d/%d | hitting %d mobs", raidTargetIslandIndex, RAID_ISLAND_COUNT, #mobs)
 end
 local function updateRaidSessionLock()
 	local timerVisible = isRaidTimerVisible()
 	if timerVisible and not lastRaidTimerVisible then
 		raidSessionActive = true
+		raidTargetIslandIndex = 1
 		raidEmptySince = nil
+		raidAttackAccum = 0
 		clearMovement("raid_start")
 		clearMovement("raid")
+		syncMovementPartToPlayer()
 		lastRaidAction = "Raid started"
 	end
 	if lastRaidTimerVisible and not timerVisible and not isLoadingMap() and not isNearAnyRaidIsland() then
@@ -1669,30 +1741,6 @@ local function updateRaidSessionLock()
 	end
 	lastRaidTimerVisible = timerVisible
 end
-local function runRaidCombat()
-	if not autoCompleteRaid then return end
-	if not isRaidActive() and not isNearAnyRaidIsland() then return end
-	clearMovement("raid_start")
-	clearMovement("raid")
-	setNoclip(true)
-	local islandPart, islandIndex = getActiveRaidIslandPart()
-	raidTargetIslandIndex = islandIndex
-	if islandPart then holdCombatHover(islandPart) end
-	local mobs = getRaidMobsNearPlayer(islandPart)
-	if #mobs == 0 then
-		lastRaidAction = string.format("Combat: island %d — searching mobs...", islandIndex)
-		return
-	end
-	raidEmptySince = nil
-	bringMobsUnderPlayer(mobs)
-	local now = tick()
-	local delay = attackSettings.attackMode == "Fast" and RAID_FAST_ATTACK or 0.3
-	if now - lastAttackTick >= delay then
-		lastAttackTick = now
-		attackAllMobs(mobs)
-	end
-	lastRaidAction = string.format("Combat: island %d/%d | hitting %d mobs", islandIndex, RAID_ISLAND_COUNT, #mobs)
-end
 local function runRaidAutomation()
 	if not alive or not raidAutomationEnabled() then return end
 	resolveSendHits()
@@ -1702,7 +1750,6 @@ local function runRaidAutomation()
 	updateRaidSessionLock()
 	if isRaidActive() or isNearAnyRaidIsland() then
 		clearMovement("raid_start")
-		if autoCompleteRaid then runRaidCombat() end
 		return
 	end
 	if hasMicrochip() then
@@ -2275,6 +2322,8 @@ local toggleAutoComplete = createToggleRow(raidsScroll, "Auto Complete Raid", fa
 		ensureMovementTweenPart()
 		raidTargetIslandIndex = 1
 		raidEmptySince = nil
+		raidAttackAccum = 0
+		syncMovementPartToPlayer()
 	else
 		cleanupRaidMovement()
 	end
@@ -2530,8 +2579,12 @@ jumpSlider = createSliderRow(playerPanel, "Jump Height", round(pendingJump), 2)
 connect(RunService.RenderStepped, function(dt)
 	if not alive then return end
 	syncMovementTween(dt)
+	if autoCompleteRaid and (isRaidActive() or isNearAnyRaidIsland()) then
+		pcall(updateRaidSessionLock)
+		pcall(runRaidCombat, dt)
+		return
+	end
 	if movementFollowOwner then return end
-	if autoCompleteRaid and (isRaidActive() or isNearAnyRaidIsland()) then return end
 	if not walkBoostActive or not appliedWalk then return end
 	local humanoid = getHumanoid()
 	local hrp = getRootPart()
