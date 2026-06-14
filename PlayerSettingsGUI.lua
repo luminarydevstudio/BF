@@ -107,6 +107,19 @@ local function mapJumpHeight(slider)
 	return 7.2 + (t * t * t) * 504
 end
 local alive, connections, isMinimized, isHidden, activeTab = true, {}, false, false, "Player"
+local HUB_DEBUG_MAX = 220
+local HUB_DEBUG_VAR_MAX = 20
+local HubDebug = {
+	entries = {},
+	varSnapshots = {},
+	enabled = true,
+	logLabel = nil,
+	logScroll = nil,
+	statusLabel = nil,
+	lastVarAt = 0,
+	varInterval = 2.5,
+}
+local debugTab
 local pendingWalk, pendingJump, appliedWalk, appliedJump = 0, 0, nil, nil
 local walkBoostActive, jumpBoostActive = false, false
 local originalWalk, originalJump, originalUseJumpPower = nil, nil, nil
@@ -274,6 +287,163 @@ local function connect(signal, fn)
 	table.insert(connections, c)
 	return c
 end
+local function HubDebugFmtTime()
+	return os.date("%H:%M:%S")
+end
+local function HubDebugFmtVal(v, depth)
+	depth = depth or 0
+	if depth > 2 then return "..." end
+	local t = typeof(v)
+	if v == nil then return "nil" end
+	if t == "string" then
+		if #v > 120 then return string.format("%q...", string.sub(v, 1, 117)) end
+		return string.format("%q", v)
+	end
+	if t == "number" or t == "boolean" then return tostring(v) end
+	if t == "Instance" then
+		local ok, name = pcall(function() return v:GetFullName() end)
+		return ok and name or (v.ClassName .. ":" .. tostring(v.Name))
+	end
+	if t == "Vector3" then return string.format("(%.1f,%.1f,%.1f)", v.X, v.Y, v.Z) end
+	if t == "table" then
+		local parts, n = {}, 0
+		for k, val in pairs(v) do
+			n += 1
+			if n > 8 then table.insert(parts, "...") break end
+			table.insert(parts, tostring(k) .. "=" .. HubDebugFmtVal(val, depth + 1))
+		end
+		return "{" .. table.concat(parts, ", ") .. "}"
+	end
+	return tostring(v)
+end
+local function HubDebugFmtArgs(...)
+	local n = select("#", ...)
+	local parts = {}
+	for i = 1, n do
+		table.insert(parts, HubDebugFmtVal(select(i, ...)))
+	end
+	return table.concat(parts, ", ")
+end
+local function HubDebugRefreshUI()
+	if not HubDebug.logLabel or not HubDebug.logScroll then return end
+	local lines = {}
+	for _, entry in HubDebug.entries do
+		table.insert(lines, entry)
+	end
+	HubDebug.logLabel.Text = #lines > 0 and table.concat(lines, "\n") or "(empty — use the hub, then Copy Report)"
+	task.defer(function()
+		if HubDebug.logScroll and HubDebug.logLabel then
+			HubDebug.logScroll.CanvasSize = UDim2.fromOffset(0, HubDebug.logLabel.TextBounds.Y + 16)
+			HubDebug.logScroll.CanvasPosition = Vector2.new(0, math.max(0, HubDebug.logScroll.CanvasSize.Y.Offset))
+		end
+	end)
+end
+function HubDebug.Log(category, message)
+	if not HubDebug.enabled then return end
+	local line = string.format("[%s] [%s] %s", HubDebugFmtTime(), tostring(category), tostring(message))
+	table.insert(HubDebug.entries, line)
+	while #HubDebug.entries > HUB_DEBUG_MAX do
+		table.remove(HubDebug.entries, 1)
+	end
+	HubDebugRefreshUI()
+end
+function HubDebug.LogError(category, err)
+	HubDebug.Log("ERROR", string.format("[%s] %s", tostring(category), tostring(err)))
+end
+function HubDebug.LogVars(label, data)
+	if not HubDebug.enabled then return end
+	local parts = { tostring(label) .. ":" }
+	for k, v in pairs(data) do
+		table.insert(parts, tostring(k) .. "=" .. HubDebugFmtVal(v))
+	end
+	local line = string.format("[%s] [VAR] %s", HubDebugFmtTime(), table.concat(parts, " | "))
+	table.insert(HubDebug.varSnapshots, line)
+	while #HubDebug.varSnapshots > HUB_DEBUG_VAR_MAX do
+		table.remove(HubDebug.varSnapshots, 1)
+	end
+	HubDebug.Log("VAR", table.concat(parts, " | "))
+end
+function HubDebug.LogEvent(eventName, detail)
+	HubDebug.Log("EVENT", (detail and (eventName .. " — " .. detail) or eventName))
+end
+function HubDebug.Clear()
+	HubDebug.entries = {}
+	HubDebug.varSnapshots = {}
+	HubDebugRefreshUI()
+end
+local function HubDebugExecutorCaps()
+	return string.format(
+		"sethiddenproperty=%s fireclickdetector=%s firesignal=%s setclipboard=%s",
+		tostring(typeof(sethiddenproperty) == "function"),
+		tostring(typeof(fireclickdetector) == "function"),
+		tostring(typeof(firesignal) == "function"),
+		tostring(typeof(setclipboard) == "function" or typeof(toclipboard) == "function" or typeof(writeclipboard) == "function")
+	)
+end
+local HubDebugCollectSnapshot
+local function HubDebugBuildReport()
+	local lines = {
+		"=== PlayerSettingsGUI Debug Report ===",
+		"Generated: " .. os.date("%Y-%m-%d %H:%M:%S"),
+		"UserId: " .. tostring(LocalPlayer.UserId),
+		"PlaceId: " .. tostring(game.PlaceId),
+		"JobId: " .. tostring(game.JobId),
+		HubDebugExecutorCaps(),
+		"",
+		"--- HEALTH CHECK ---",
+	}
+	if HubDebugCollectSnapshot then
+		local snap = HubDebugCollectSnapshot()
+		for k, v in pairs(snap) do
+			table.insert(lines, tostring(k) .. " = " .. HubDebugFmtVal(v))
+		end
+	else
+		table.insert(lines, "snapshot=unavailable")
+	end
+	table.insert(lines, "")
+	table.insert(lines, "--- RAID DIAG ---")
+	table.insert(lines, "title=" .. tostring(Raid.diagTitle))
+	table.insert(lines, "message=" .. tostring(Raid.diagMessage))
+	table.insert(lines, "detail=" .. tostring(Raid.diagDetail))
+	table.insert(lines, "")
+	table.insert(lines, "--- VARIABLE HISTORY (last " .. tostring(#HubDebug.varSnapshots) .. ") ---")
+	if #HubDebug.varSnapshots == 0 then
+		table.insert(lines, "(none)")
+	else
+		for _, v in HubDebug.varSnapshots do
+			table.insert(lines, v)
+		end
+	end
+	table.insert(lines, "")
+	table.insert(lines, "--- EVENT LOG (last " .. tostring(#HubDebug.entries) .. ") ---")
+	if #HubDebug.entries == 0 then
+		table.insert(lines, "(empty)")
+	else
+		for _, e in HubDebug.entries do
+			table.insert(lines, e)
+		end
+	end
+	return table.concat(lines, "\n")
+end
+local function HubDebugCopyReport()
+	local text = HubDebugBuildReport()
+	local copied = false
+	if typeof(setclipboard) == "function" then
+		copied = pcall(setclipboard, text)
+	elseif typeof(toclipboard) == "function" then
+		copied = pcall(toclipboard, text)
+	elseif typeof(writeclipboard) == "function" then
+		copied = pcall(writeclipboard, text)
+	end
+	if HubDebug.statusLabel then
+		HubDebug.statusLabel.Text = copied
+			and "Report copied to clipboard. Paste it in chat for the developer."
+			or "Clipboard API missing — select log text manually."
+		HubDebug.statusLabel.TextColor3 = copied and COLORS.success or COLORS.warn
+	end
+	HubDebug.Log("SYS", copied and "Report copied to clipboard" or "Copy failed — no clipboard API")
+	return copied, text
+end
 local function tween(instance, props, info) return TweenService:Create(instance, info or TWEEN_INFO, props) end
 local function bindHover(button, baseColor, hoverColor)
 	button.MouseEnter:Connect(function()
@@ -291,14 +461,25 @@ local function getCommF()
 	return cachedCommF
 end
 local function invokeCommF(...)
+	local args = { ... }
 	local commF = getCommF()
 	if not commF then
 		commF = ReplicatedStorage:WaitForChild("Remotes", 8):WaitForChild("CommF_", 8)
 	end
-	if not commF then return false, "CommF_ missing" end
-	return pcall(function(...)
+	if not commF then
+		HubDebug.Log("COMMF", "INVOKE FAILED (no remote) -> " .. HubDebugFmtArgs(...))
+		return false, "CommF_ missing"
+	end
+	HubDebug.Log("COMMF", "INVOKE -> CommF_(" .. HubDebugFmtArgs(...) .. ")")
+	local ok, result = pcall(function(...)
 		return commF:InvokeServer(...)
 	end, ...)
+	if ok then
+		HubDebug.Log("COMMF", "OK <- " .. HubDebugFmtVal(result))
+	else
+		HubDebug.Log("COMMF", "ERR <- " .. tostring(result))
+	end
+	return ok, result
 end
 local function waitForDataLoaded(timeout)
 	if LocalPlayer:FindFirstChild("DataLoaded") then return true end
@@ -341,9 +522,7 @@ local function joinTeam(teamName)
 		commF = ReplicatedStorage:WaitForChild("Remotes", 10):WaitForChild("CommF_", 10)
 	end
 	if commF then
-		local ok, result = pcall(function()
-			return commF:InvokeServer("SetTeam", teamName)
-		end)
+		local ok, result = invokeCommF("SetTeam", teamName)
 		if ok then return true, "Team switch sent through CommF_ (recruiter path)." end
 		return false, "CommF_ failed: " .. tostring(result)
 	end
@@ -821,6 +1000,7 @@ local function RaidSetDiag(level, title, message, detail)
 	if Raid.diagDetail ~= "" then
 		Raid.status = Raid.diagMessage .. "\n" .. Raid.diagDetail
 	end
+	HubDebug.Log("RAID", string.format("[%s] %s | %s%s", tostring(level), tostring(title), tostring(message), detail ~= "" and (" | " .. detail) or ""))
 end
 local function RaidRefreshDiagUI()
 	if not diagMessageLabel then return end
@@ -1818,8 +1998,10 @@ local function RaidStart()
 	end
 	if typeof(fireclickdetector) == "function" then
 		pcall(fireclickdetector, detector, 0)
+		HubDebug.Log("RAID", "Start: fireclickdetector on " .. HubDebugFmtVal(detector))
 	else
 		RaidClickPad(detector)
+		HubDebug.Log("RAID", "Start: RaidClickPad fallback on " .. HubDebugFmtVal(detector))
 	end
 	RaidSetDiag("busy", "Auto Start", "Pad clicked - entering raid...", "Waiting for Island 1 (Redz instant start, no tween).")
 	return true
@@ -2110,16 +2292,69 @@ local function RaidCompleteStep()
 		end
 		local usedHits = RaidAttackNearbyMobs()
 		local mode = usedAura and (usedHits and "aura+hits" or "aura only") or (usedHits and "register hits" or "no mobs in range")
+		local logKey = tostring(islandIndex) .. "|" .. mode
+		local now = tick()
+		if Raid._lastCompleteLog ~= logKey or now - (Raid._lastCompleteLogAt or 0) > 3 then
+			Raid._lastCompleteLog = logKey
+			Raid._lastCompleteLogAt = now
+			HubDebug.Log("RAID", "Complete: island=" .. tostring(islandIndex) .. " mode=" .. mode)
+		end
 		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | %s", islandIndex, mode), usedAura and "SimulationRadius active" or "Executor missing sethiddenproperty - using RegisterHit fallback")
 	else
 		Raid.farmingActive = false
+		local now = tick()
+		if now - (Raid._lastCompleteLogAt or 0) > 3 then
+			Raid._lastCompleteLogAt = now
+			HubDebug.Log("RAID", "Complete: timer on but no island within range")
+		end
 		RaidSetDiag("busy", "Auto Complete", "Raid timer on but no island found", "Stand on a raid island or wait for Island 1-5 within 3000 studs")
 	end
 end
 local function RaidTryAwaken()
 	if not Raid.autoAwaken then return end
+	HubDebug.Log("RAID", "Awaken: sending Check + Awaken")
 	invokeCommF("Awakener", "Check")
 	invokeCommF("Awakener", "Awaken")
+end
+HubDebugCollectSnapshot = function()
+	local hrp = getRootPart()
+	local island, islandIndex = RaidGetHighestIsland()
+	local pad = RaidGetPadDetector()
+	return {
+		sea = getCurrentSeaNumber(),
+		placeId = game.PlaceId,
+		level = RaidGetStat("Level") or RaidGetStat("level"),
+		beli = RaidGetStat("Beli"),
+		chip = RaidHasChip(),
+		timer = RaidHasTimer(),
+		timerMain = RaidHasRaidTimer(),
+		onIsland = RaidOnAnyIsland(),
+		islandIndex = islandIndex,
+		island = island and island.Name or nil,
+		hrp = hrp and hrp.Position or nil,
+		selectedRaid = Raid.selected,
+		buyBeli = Raid.buyBeli,
+		buyFruit = Raid.buyFruit,
+		autoStart = Raid.autoStart,
+		autoComplete = Raid.autoComplete,
+		autoAwaken = Raid.autoAwaken,
+		farmingActive = Raid.farmingActive,
+		commF = getCommF() ~= nil,
+		pad = pad ~= nil,
+		weapon = attackSettings.weaponType,
+		activeTab = activeTab,
+		diag = Raid.diagMessage,
+	}
+end
+local function HubDebugMaybeSnapshot(label)
+	local now = tick()
+	if not label and now - HubDebug.lastVarAt < HubDebug.varInterval then
+		return
+	end
+	HubDebug.lastVarAt = now
+	if HubDebugCollectSnapshot then
+		HubDebug.LogVars(label or "periodic", HubDebugCollectSnapshot())
+	end
 end
 local function RaidUpdateSession()
 	local timerVisible = RaidHasTimer()
@@ -2358,6 +2593,7 @@ local function createToggleRow(parent, labelText, defaultState, onChanged, layou
 		tween(knob, { Position = state and UDim2.fromOffset(24, 2) or UDim2.fromOffset(2, 2) }, TWEEN_FAST):Play()
 		if not silent and onChanged then
 			onChanged(state)
+			HubDebug.Log("TOGGLE", labelText .. " -> " .. tostring(state))
 		end
 	end
 	toggleBg.MouseButton1Click:Connect(function()
@@ -2541,6 +2777,7 @@ local function restoreMovement()
 end
 local function switchTab(tabName)
 	activeTab = tabName
+	HubDebug.Log("UI", "Tab -> " .. tabName)
 	for name, panel in tabPanels do
 		panel.Visible = name == tabName
 	end
@@ -2551,6 +2788,7 @@ local function switchTab(tabName)
 		["A-Settings"] = "A-Set",
 		Teleport = "TP",
 		Fruits = "Fruits",
+		Debug = "Debug",
 	}
 	local activeBtn = tabToButton[tabName]
 	for name, btn in tabButtons do
@@ -2629,12 +2867,14 @@ registerTab("Raids", 3)
 registerTab("A-Set", 4)
 registerTab("TP", 5)
 registerTab("Fruits", 6)
+registerTab("Debug", 7)
 playerTab = tabButtons.Player
 teamsTab = tabButtons.Teams
 raidsTab = tabButtons.Raids
 aSettingsTab = tabButtons["A-Set"]
 teleportTab = tabButtons.TP
 fruitsTab = tabButtons.Fruits
+debugTab = tabButtons.Debug
 local contentArea = Instance.new("Frame"); contentArea.Name = "Content"; contentArea.Size = UDim2.new(1, -(SIDEBAR_W + 10), 1, 0); contentArea.Position = UDim2.fromOffset(SIDEBAR_W + 10, 0); contentArea.BackgroundTransparency = 1; contentArea.ClipsDescendants = true; contentArea.Parent = body
 local pages = Instance.new("Frame"); pages.Name = "Pages"; pages.Size = UDim2.fromScale(1, 1); pages.BackgroundTransparency = 1; pages.ClipsDescendants = false; pages.Parent = contentArea
 local playerPanel = Instance.new("Frame"); playerPanel.Name = "PlayerPanel"; playerPanel.Size = UDim2.fromScale(1, 1); playerPanel.BackgroundTransparency = 1; playerPanel.Visible = true; playerPanel.Parent = pages
@@ -2643,6 +2883,7 @@ local raidsPanel = Instance.new("Frame"); raidsPanel.Name = "RaidsPanel"; raidsP
 local aSettingsPanel = Instance.new("Frame"); aSettingsPanel.Name = "ASettingsPanel"; aSettingsPanel.Size = UDim2.fromScale(1, 1); aSettingsPanel.BackgroundTransparency = 1; aSettingsPanel.Visible = false; aSettingsPanel.Parent = pages
 local teleportPanel = Instance.new("Frame"); teleportPanel.Name = "TeleportPanel"; teleportPanel.Size = UDim2.fromScale(1, 1); teleportPanel.BackgroundTransparency = 1; teleportPanel.Visible = false; teleportPanel.Parent = pages
 local fruitsPanel = Instance.new("Frame"); fruitsPanel.Name = "FruitsPanel"; fruitsPanel.Size = UDim2.fromScale(1, 1); fruitsPanel.BackgroundTransparency = 1; fruitsPanel.Visible = false; fruitsPanel.Parent = pages
+local debugPanel = Instance.new("Frame"); debugPanel.Name = "DebugPanel"; debugPanel.Size = UDim2.fromScale(1, 1); debugPanel.BackgroundTransparency = 1; debugPanel.Visible = false; debugPanel.Parent = pages
 local raidsScroll = createScrollPage(raidsPanel)
 local aSettingsScroll = createScrollPage(aSettingsPanel)
 local teleportScroll = createScrollPage(teleportPanel)
@@ -2654,7 +2895,40 @@ tabPanels = {
 	["A-Settings"] = aSettingsPanel,
 	Teleport = teleportPanel,
 	Fruits = fruitsPanel,
+	Debug = debugPanel,
 }
+local debugHeader = Instance.new("Frame"); debugHeader.Name = "DebugHeader"; debugHeader.Size = UDim2.new(1, 0, 0, 56); debugHeader.BackgroundColor3 = COLORS.surface; debugHeader.BorderSizePixel = 0; debugHeader.Parent = debugPanel
+makeCorner(debugHeader, 8)
+makeStroke(debugHeader, COLORS.stroke, 1)
+local debugHeaderPad = Instance.new("UIPadding"); debugHeaderPad.PaddingTop = UDim.new(0, 8); debugHeaderPad.PaddingBottom = UDim.new(0, 8); debugHeaderPad.PaddingLeft = UDim.new(0, 10); debugHeaderPad.PaddingRight = UDim.new(0, 10); debugHeaderPad.Parent = debugHeader
+local debugTitle = Instance.new("TextLabel"); debugTitle.Size = UDim2.new(1, 0, 0, 18); debugTitle.BackgroundTransparency = 1; debugTitle.Font = Enum.Font.GothamBold; debugTitle.TextSize = 13; debugTitle.TextXAlignment = Enum.TextXAlignment.Left; debugTitle.TextColor3 = COLORS.text; debugTitle.Text = "Global Debug Log"; debugTitle.Parent = debugHeader
+local debugSub = Instance.new("TextLabel"); debugSub.Size = UDim2.new(1, 0, 0, 28); debugSub.Position = UDim2.fromOffset(0, 20); debugSub.BackgroundTransparency = 1; debugSub.Font = Enum.Font.Gotham; debugSub.TextSize = 9; debugSub.TextWrapped = true; debugSub.TextXAlignment = Enum.TextXAlignment.Left; debugSub.TextYAlignment = Enum.TextYAlignment.Top; debugSub.TextColor3 = COLORS.textMuted; debugSub.Text = "Records CommF calls, toggles, raid steps, and live variables. Copy Report and paste in chat for instant diagnosis."; debugSub.Parent = debugHeader
+local debugBtnRow = Instance.new("Frame"); debugBtnRow.Name = "DebugButtons"; debugBtnRow.Size = UDim2.new(1, 0, 0, 30); debugBtnRow.Position = UDim2.fromOffset(0, 60); debugBtnRow.BackgroundTransparency = 1; debugBtnRow.Parent = debugPanel
+local btnCopyReport = makeButton(debugBtnRow, "Copy Report", COLORS.accent, UDim2.fromOffset(108, 28)); btnCopyReport.Position = UDim2.fromOffset(0, 0)
+local btnClearLog = makeButton(debugBtnRow, "Clear", COLORS.surfaceAlt, UDim2.fromOffset(72, 28)); btnClearLog.Position = UDim2.fromOffset(116, 0)
+local btnSnapNow = makeButton(debugBtnRow, "Snapshot", COLORS.surfaceAlt, UDim2.fromOffset(84, 28)); btnSnapNow.Position = UDim2.fromOffset(196, 0)
+HubDebug.statusLabel = Instance.new("TextLabel"); HubDebug.statusLabel.Size = UDim2.new(1, 0, 0, 16); HubDebug.statusLabel.Position = UDim2.fromOffset(0, 94); HubDebug.statusLabel.BackgroundTransparency = 1; HubDebug.statusLabel.Font = Enum.Font.Gotham; HubDebug.statusLabel.TextSize = 9; HubDebug.statusLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.statusLabel.TextColor3 = COLORS.textMuted; HubDebug.statusLabel.Text = "Ready — run raids or toggles to populate the log."; HubDebug.statusLabel.Parent = debugPanel
+HubDebug.logScroll = Instance.new("ScrollingFrame"); HubDebug.logScroll.Name = "DebugLog"; HubDebug.logScroll.Size = UDim2.new(1, 0, 1, -118); HubDebug.logScroll.Position = UDim2.fromOffset(0, 114); HubDebug.logScroll.BackgroundColor3 = COLORS.bg; HubDebug.logScroll.BorderSizePixel = 0; HubDebug.logScroll.ScrollBarThickness = 4; HubDebug.logScroll.ScrollBarImageColor3 = COLORS.accent; HubDebug.logScroll.CanvasSize = UDim2.fromOffset(0, 0); HubDebug.logScroll.Parent = debugPanel
+makeCorner(HubDebug.logScroll, 6)
+HubDebug.logLabel = Instance.new("TextLabel"); HubDebug.logLabel.Name = "LogText"; HubDebug.logLabel.Size = UDim2.new(1, -12, 0, 0); HubDebug.logLabel.Position = UDim2.fromOffset(6, 6); HubDebug.logLabel.BackgroundTransparency = 1; HubDebug.logLabel.Font = Enum.Font.Code; HubDebug.logLabel.TextSize = 9; HubDebug.logLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.logLabel.TextYAlignment = Enum.TextYAlignment.Top; HubDebug.logLabel.TextWrapped = true; HubDebug.logLabel.TextColor3 = COLORS.textMuted; HubDebug.logLabel.AutomaticSize = Enum.AutomaticSize.Y; HubDebug.logLabel.Text = "(empty)"; HubDebug.logLabel.Parent = HubDebug.logScroll
+btnCopyReport.MouseButton1Click:Connect(function()
+	HubDebugCopyReport()
+end)
+btnClearLog.MouseButton1Click:Connect(function()
+	HubDebug.Clear()
+	HubDebug.Log("SYS", "Log cleared by user")
+	if HubDebug.statusLabel then
+		HubDebug.statusLabel.Text = "Log cleared."
+		HubDebug.statusLabel.TextColor3 = COLORS.textMuted
+	end
+end)
+btnSnapNow.MouseButton1Click:Connect(function()
+	HubDebugMaybeSnapshot("manual")
+	if HubDebug.statusLabel then
+		HubDebug.statusLabel.Text = "Manual variable snapshot captured."
+		HubDebug.statusLabel.TextColor3 = COLORS.success
+	end
+end)
 local playerLayout = Instance.new("UIListLayout"); playerLayout.SortOrder = Enum.SortOrder.LayoutOrder; playerLayout.Padding = UDim.new(0, 14); playerLayout.Parent = playerPanel
 local teamsCard = Instance.new("Frame"); teamsCard.Name = "TeamsCard"; teamsCard.Size = UDim2.new(1, 0, 0, 220); teamsCard.BackgroundColor3 = COLORS.surface; teamsCard.BorderSizePixel = 0; teamsCard.Parent = teamsPanel
 makeCorner(teamsCard, 10)
@@ -2926,6 +3200,7 @@ local function rebuildRaidMenu()
 			pick.MouseButton1Click:Connect(function()
 				Raid.selected = raidName
 				raidSelectedLabel.Text = "Selected: " .. raidName
+				HubDebug.Log("RAID", "Selected raid: " .. raidName)
 				RaidSetDiag("idle", "Raid Ready", "Selected: " .. raidName, "Enable Auto Buy Chip or Auto Start Raid.")
 				raidMenu.Visible = false
 				raidMenu.Size = UDim2.new(1, 0, 0, 0)
@@ -3017,7 +3292,10 @@ task.spawn(function()
 	while alive do
 		task.wait()
 		if Raid.autoComplete and RaidHasTimer() then
-			pcall(RaidCompleteStep)
+			local ok, err = pcall(RaidCompleteStep)
+			if not ok then
+				HubDebug.LogError("RAID_COMPLETE", err)
+			end
 		elseif not Raid.autoComplete then
 			Raid.farmingActive = false
 		end
@@ -3027,7 +3305,10 @@ task.spawn(function()
 	while alive do
 		task.wait(0.5)
 		if Raid.autoAwaken and Raid.autoComplete then
-			pcall(RaidTryAwaken)
+			local ok, err = pcall(RaidTryAwaken)
+			if not ok then
+				HubDebug.LogError("RAID_AWAKEN", err)
+			end
 		end
 	end
 end)
@@ -3048,6 +3329,7 @@ connect(RunService.Heartbeat, function()
 	pcall(runIslandTeleport)
 	pcall(runFruitAutomation)
 	pcall(RaidTick)
+	HubDebugMaybeSnapshot()
 	if raidStatsLabel then
 		raidStatsLabel.Text = RaidGetLiveStatsText()
 	end
@@ -3130,6 +3412,10 @@ end)
 fruitsTab.MouseButton1Click:Connect(function()
 	switchTab("Fruits")
 	refreshStockDisplay(true)
+end)
+debugTab.MouseButton1Click:Connect(function()
+	switchTab("Debug")
+	HubDebugRefreshUI()
 end)
 btnPirates.MouseButton1Click:Connect(function()
 	onTeamSelected("Pirates")
@@ -3280,4 +3566,15 @@ if not buildOk then
 	warn("[PlayerSettingsGUI]", buildErr)
 	return
 end
+local nativeWarn = warn
+warn = function(...)
+	local parts = {}
+	for i = 1, select("#", ...) do
+		table.insert(parts, tostring(select(i, ...)))
+	end
+	HubDebug.Log("WARN", table.concat(parts, " "))
+	return nativeWarn(...)
+end
+HubDebug.Log("SYS", "GUI loaded — debug recorder active")
+HubDebugMaybeSnapshot("boot")
 print("[PlayerSettingsGUI] Loaded successfully.")
