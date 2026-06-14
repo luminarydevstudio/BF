@@ -135,6 +135,7 @@ local Raid = {
 	diagTitle = "System Status",
 	diagMessage = "Ready - toggle a raid option to begin.",
 	diagDetail = "",
+	farmingActive = false,
 }
 local RAID_LAB = {
 	[2] = CFrame.new(-5556.24316, 314.034393, -2974.21533),
@@ -568,28 +569,44 @@ local function RaidIsSeaValid()
 	end
 	return false
 end
-local function RaidGetIsland(islandName)
-	local hrp = getRootPart()
+local function RaidGetIslandInstance(islandName)
+	local char = getCharacter()
+	local hrp = char and char.PrimaryPart or getRootPart()
 	if not hrp then return nil end
 	local locations = workspace:FindFirstChild("_WorldOrigin")
 	locations = locations and locations:FindFirstChild("Locations")
 	if not locations then return nil end
-	for _, child in locations:GetChildren() do
-		if child.Name == islandName then
+	for _, island in locations:GetChildren() do
+		if island.Name == islandName then
 			local pos
-			if child:IsA("BasePart") then
-				pos = child.Position
+			if island:IsA("BasePart") then
+				pos = island.Position
 			else
-				local part = getIslandPartFromInstance(child)
+				local part = getIslandPartFromInstance(island)
 				pos = part and part.Position
 			end
 			if pos and (pos - hrp.Position).Magnitude < RAID_CFG.ISLAND_RANGE then
-				if child:IsA("BasePart") then return child end
-				return getIslandPartFromInstance(child)
+				return island
 			end
 		end
 	end
 	return nil
+end
+local function RaidIslandCFrame(island)
+	if not island then return nil end
+	if island:IsA("BasePart") then return island.CFrame end
+	if island:IsA("Model") then
+		local ok, pivot = pcall(function() return island:GetPivot() end)
+		if ok and pivot then return pivot end
+	end
+	local part = getIslandPartFromInstance(island)
+	return part and part.CFrame
+end
+local function RaidGetIsland(islandName)
+	local island = RaidGetIslandInstance(islandName)
+	if not island then return nil end
+	if island:IsA("BasePart") then return island end
+	return getIslandPartFromInstance(island)
 end
 local function RaidGetPadDetector()
 	local map = workspace:FindFirstChild("Map")
@@ -625,8 +642,8 @@ local function RaidOnAnyIsland()
 end
 local function RaidGetHighestIsland()
 	for index = 5, 1, -1 do
-		local part = RaidGetIsland("Island " .. tostring(index))
-		if part then return part, index end
+		local island = RaidGetIslandInstance("Island " .. tostring(index))
+		if island then return island, index end
 	end
 	return nil, 0
 end
@@ -879,7 +896,8 @@ local function syncNoclipState()
 		or (movementFollowOwner == "raid" and Raid.autoComplete)
 		or (movementFollowOwner == "raid_pad" and Raid.autoStart)
 		or (movementFollowOwner == "raid_lab" and (Raid.buyBeli or Raid.buyFruit))
-	) or (Raid.autoComplete and (RaidHasTimer() or RaidOnAnyIsland()))
+	) or (Raid.autoComplete and RaidHasRaidTimer())
+		or (Raid.farmingActive and Raid.autoComplete)
 	setNoclip(shouldNoclip)
 end
 local function clearMovement(owner)
@@ -2017,32 +2035,63 @@ local function RaidHoverIsland(islandPart, dt)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero
 end
-local function RaidRunCombat(dt)
-	if not Raid.autoComplete or not RaidHasRaidTimer() then return end
-	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
-	setNoclip(true)
-	RaidSetCombatState(true)
-	RaidEquipWeapon()
-	RaidTryFruitTransform()
-	local islandPart, islandIndex = RaidGetHighestIsland()
-	if islandPart then
-		RaidPivotTo(islandPart.CFrame + Vector3.new(0, RAID_CFG.HOVER_Y, 0))
+local function RaidKillAura()
+	local hrp = getRootPart()
+	if not hrp then return end
+	local function killEnemy(enemy)
+		if not enemy then return end
+		local hum = enemy:FindFirstChild("Humanoid")
+		if hum and hum.Health > 0 then
+			local mobRoot = enemy:FindFirstChild("HumanoidRootPart")
+			if mobRoot and (hrp.Position - mobRoot.Position).Magnitude < 1500 then
+				pcall(function()
+					if typeof(sethiddenproperty) == "function" then
+						sethiddenproperty(LocalPlayer, "SimulationRadius", math.huge)
+					end
+				end)
+				mobRoot.Size = Vector3.new(75, 75, 75)
+				mobRoot.CanCollide = false
+				hum.Health = 0
+			end
+		else
+			local head = enemy:FindFirstChild("Head")
+			if head then pcall(function() head:Destroy() end) end
+		end
 	end
-	local mobs = RaidGetMobs(islandPart)
-	if #mobs == 0 then
-		RaidSetDiag("busy", "Auto Complete", islandIndex > 0
-			and string.format("Island %d clear - scanning next...", islandIndex)
-			or "Waiting for raid islands...", "")
+	local enemies = workspace:FindFirstChild("Enemies")
+	if enemies then
+		for _, enemy in enemies:GetChildren() do
+			killEnemy(enemy)
+		end
+	end
+	for _, child in ReplicatedStorage:GetChildren() do
+		killEnemy(child)
+	end
+end
+local function RaidCompleteStep()
+	if not Raid.autoComplete or not RaidHasRaidTimer() then
+		Raid.farmingActive = false
 		return
 	end
-	RaidBringMobs(mobs, dt)
-	Raid.attackAccum += dt
-	local delay = attackSettings.attackMode == "Fast" and RAID_CFG.FAST_ATTACK or RAID_CFG.NORMAL_ATTACK
-	if Raid.attackAccum >= delay then
-		Raid.attackAccum = 0
-		RaidAttackMobs(mobs)
+	clearMovement(nil)
+	setNoclip(true)
+	RaidEquipWeapon()
+	RaidTryFruitTransform()
+	local targetIsland, islandIndex = RaidGetHighestIsland()
+	if targetIsland then
+		local cf = RaidIslandCFrame(targetIsland)
+		if cf then
+			RaidPivotTo(cf + Vector3.new(0, RAID_CFG.HOVER_Y, 0))
+		end
+		Raid.farmingActive = true
+		local tool = getCharacter() and getCharacter():FindFirstChildOfClass("Tool")
+		if tool then pcall(function() tool:Activate() end) end
+		RaidKillAura()
+		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | kill aura farming", islandIndex), "Redz-style SimulationRadius + TP +70")
+	else
+		Raid.farmingActive = false
+		RaidSetDiag("busy", "Auto Complete", "Timer on - waiting for islands in range", "Islands spawn within 3000 studs")
 	end
-	RaidSetDiag("ok", "Auto Complete", string.format("Fighting island %d (%d mobs)", islandIndex, #mobs), "Weapon: " .. attackSettings.weaponType .. " | Mode: " .. attackSettings.attackMode)
 end
 local function RaidTryAwaken()
 	if not Raid.autoAwaken or RaidHasTimer() or RaidOnAnyIsland() then return end
@@ -2930,9 +2979,6 @@ jumpSlider = createSliderRow(playerPanel, "Jump Height", round(pendingJump), 2)
 connect(RunService.RenderStepped, function(dt)
 	if not alive then return end
 	syncMovementTween(dt)
-	if Raid.autoComplete and RaidHasRaidTimer() then
-		pcall(RaidRunCombat, dt)
-	end
 	if movementFollowOwner then return end
 	if not walkBoostActive or not appliedWalk then return end
 	local humanoid = getHumanoid()
@@ -2943,6 +2989,16 @@ connect(RunService.RenderStepped, function(dt)
 	if moveDir.Magnitude < 0.05 then return end
 	local delta = moveDir.Unit * appliedWalk * dt
 	hrp.CFrame = hrp.CFrame + delta
+end)
+task.spawn(function()
+	while alive do
+		task.wait()
+		if Raid.autoComplete and RaidHasRaidTimer() then
+			pcall(RaidCompleteStep)
+		elseif not Raid.autoComplete then
+			Raid.farmingActive = false
+		end
+	end
 end)
 connect(RunService.Heartbeat, function()
 	if not alive then return end
