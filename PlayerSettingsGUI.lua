@@ -119,16 +119,21 @@ local lastRaidTimerVisible = false
 local previewChipFruitName, previewChipFruitValue = nil, nil
 local pendingRaidFruitLoad, lastFruitLoadTick = nil, 0
 local lastSkillTicks = { Z = 0, X = 0, C = 0, V = 0, F = 0 }
-local RAID_HOVER_HEIGHT = 78
+local RAID_HOVER_HEIGHT = 72
 local RAID_ISLAND_RANGE, RAID_ISLAND_COUNT = 550, 5
-local RAID_BRING_RANGE, RAID_BRING_UNDER = 500, 46
-local RAID_PLAYER_GAP = 58
-local RAID_HITBOX_SIZE = 22
+local RAID_BRING_RANGE, RAID_BRING_UNDER = 500, 0
+local RAID_PLAYER_GAP = 50
+local RAID_HITBOX_SIZE = 24
 local RAID_FAST_ATTACK = 0.016
 local RAID_CHIP_BUY_DELAY, RAID_START_DELAY = 1, 1
-local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 180
-local RAID_HOVER_LERP, RAID_HOVER_TRAVEL_LERP = 10, 5.5
-local RAID_MOB_LERP = 12
+local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 265
+local RAID_MOVE_CAP = 320
+local RAID_MOVE_SPEED = 288
+local RAID_MOVE_SPEED_TRAVEL = 300
+local RAID_MOVE_ALPHA_CAP = 0.18
+local RAID_HOVER_LERP, RAID_HOVER_TRAVEL_LERP = 18, 14
+local RAID_MOB_LERP = 14
+local RAID_MOB_RING_BASE, RAID_MOB_RING_STEP = 14, 10
 local RAID_ISLAND_CLEAR_DELAY = 2.2
 local raidAttackAccum, raidSavedAutoRotate = 0, nil
 local sendHitsToServer = nil
@@ -556,7 +561,7 @@ local function syncMovementTween(dt)
 	local step = speed * dt
 	local alpha = dist > 0 and math.clamp(step / dist, 0, 1) or 1
 	if movementFollowOwner == "raid" or movementFollowOwner == "raid_start" then
-		alpha = math.min(alpha, 0.16)
+		alpha = math.min(alpha, RAID_MOVE_ALPHA_CAP)
 	end
 	local nextCf = current:Lerp(goal, alpha)
 	movementTweenPart.CFrame = nextCf
@@ -1598,6 +1603,14 @@ local function attackAllMobs(mobs)
 	end
 	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
 end
+local function raidCappedLerpAlpha(fromPos, toPos, dt, speedStudsPerSec)
+	local dist = (toPos - fromPos).Magnitude
+	if dist < 0.05 then return 1 end
+	dt = math.clamp(dt, 1 / 240, 0.1)
+	local maxStep = math.min(speedStudsPerSec, RAID_MOVE_CAP) * dt
+	local expAlpha = 1 - math.exp(-RAID_HOVER_LERP * dt)
+	return math.min(expAlpha, maxStep / dist, RAID_MOVE_ALPHA_CAP)
+end
 local function getRaidHoverCFrame(islandPart)
 	local hoverPos = islandPart.Position + Vector3.new(0, RAID_HOVER_HEIGHT, 0)
 	local lookAt = hoverPos + Vector3.new(0, -RAID_PLAYER_GAP, 0)
@@ -1611,8 +1624,8 @@ local function smoothCombatHover(islandPart, dt)
 	local targetCf = getRaidHoverCFrame(islandPart)
 	local currentCf = movementTweenPart.CFrame
 	local dist = (currentCf.Position - targetCf.Position).Magnitude
-	local lerpRate = dist > 120 and RAID_HOVER_TRAVEL_LERP or RAID_HOVER_LERP
-	local alpha = 1 - math.exp(-lerpRate * dt)
+	local speed = dist > 100 and RAID_MOVE_SPEED_TRAVEL or RAID_MOVE_SPEED
+	local alpha = raidCappedLerpAlpha(currentCf.Position, targetCf.Position, dt, speed)
 	local nextCf = currentCf:Lerp(targetCf, alpha)
 	movementTweenPart.CFrame = nextCf
 	hrp.CFrame = nextCf
@@ -1625,33 +1638,31 @@ local function expandRaidMobHitbox(mob, playerHrp, dt)
 	local mobRoot = mob:FindFirstChild("HumanoidRootPart")
 	if not head or not mobRoot then return end
 	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
-	local hitSize = Vector3.new(RAID_HITBOX_SIZE, RAID_HITBOX_SIZE, RAID_HITBOX_SIZE)
-	head.Size = hitSize
+	local smooth = 1 - math.exp(-RAID_MOB_LERP * dt)
 	head.CanCollide = false
 	head.Massless = true
 	head.Transparency = 1
-	mobRoot.Size = Vector3.new(RAID_HITBOX_SIZE * 0.8, RAID_HITBOX_SIZE * 0.6, RAID_HITBOX_SIZE * 0.8)
 	mobRoot.CanCollide = false
-	local towardPlayer = playerHrp.Position - mobRoot.Position
-	if towardPlayer.Magnitude > 0.1 then
-		local reach = math.min(RAID_PLAYER_GAP * 0.9, towardPlayer.Magnitude)
-		local targetHeadCf = CFrame.new(mobRoot.Position + towardPlayer.Unit * reach)
-		head.CFrame = head.CFrame:Lerp(targetHeadCf, 1 - math.exp(-RAID_MOB_LERP * dt))
-	end
+	local bodySize = Vector3.new(10, 8, 10)
+	mobRoot.Size = bodySize
+	local bridgeHeight = math.max(RAID_PLAYER_GAP - 10, 28)
+	head.Size = Vector3.new(RAID_HITBOX_SIZE, bridgeHeight, RAID_HITBOX_SIZE)
+	local bridgeCenter = mobRoot.Position:Lerp(playerHrp.Position, 0.42)
+	local targetHeadCf = CFrame.new(bridgeCenter)
+	head.CFrame = head.CFrame:Lerp(targetHeadCf, smooth)
 end
 local function bringMobsUnderPlayer(mobs, dt)
 	local hrp = getRootPart()
 	if not hrp then return end
 	dt = math.clamp(dt or 1 / 60, 1 / 240, 0.1)
 	local anchor = hrp.Position + Vector3.new(0, -RAID_PLAYER_GAP, 0)
-	local mobAlpha = 1 - math.exp(-RAID_MOB_LERP * dt)
 	for index, mob in ipairs(mobs) do
 		if not isAliveMob(mob) then continue end
 		local mobRoot = mob.HumanoidRootPart
 		if (mobRoot.Position - hrp.Position).Magnitude > RAID_BRING_RANGE then continue end
 		local angle = (index / math.max(#mobs, 1)) * math.pi * 2
-		local ring = 6 + ((index - 1) % 4) * 5
-		local offset = Vector3.new(math.cos(angle) * ring, -RAID_BRING_UNDER, math.sin(angle) * ring)
+		local ring = RAID_MOB_RING_BASE + ((index - 1) % 4) * RAID_MOB_RING_STEP
+		local offset = Vector3.new(math.cos(angle) * ring, RAID_BRING_UNDER, math.sin(angle) * ring)
 		local targetPos = anchor + offset
 		mobRoot.AssemblyLinearVelocity = Vector3.zero
 		mobRoot.AssemblyAngularVelocity = Vector3.zero
@@ -1659,13 +1670,14 @@ local function bringMobsUnderPlayer(mobs, dt)
 		if not lock then
 			lock = Instance.new("BodyPosition")
 			lock.Name = "PSG_RaidBring"
-			lock.MaxForce = Vector3.new(400000, 400000, 400000)
-			lock.P = 4200
-			lock.D = 1400
+			lock.MaxForce = Vector3.new(350000, 350000, 350000)
+			lock.P = 3800
+			lock.D = 1600
 			lock.Parent = mobRoot
 			lock.Position = mobRoot.Position
 		end
-		lock.Position = lock.Position:Lerp(targetPos, mobAlpha)
+		local stepAlpha = raidCappedLerpAlpha(lock.Position, targetPos, dt, 200)
+		lock.Position = lock.Position:Lerp(targetPos, stepAlpha)
 		expandRaidMobHitbox(mob, hrp, dt)
 	end
 end
