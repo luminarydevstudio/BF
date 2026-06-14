@@ -117,11 +117,13 @@ local RAID_ISLAND_NEAR_RANGE = 3000
 local lastRaidAutoTick, lastChipBuyTick, lastRaidStartAttempt, lastAttackTick = 0, 0, 0, 0
 local lastRaidTimerVisible = false
 local previewChipFruitName, previewChipFruitValue = nil, nil
+local pendingRaidFruitLoad, lastFruitLoadTick = nil, 0
 local lastSkillTicks = { Z = 0, X = 0, C = 0, V = 0, F = 0 }
 local RAID_HOVER_HEIGHT = 78
 local RAID_ISLAND_RANGE, RAID_ISLAND_COUNT = 550, 5
 local RAID_BRING_RANGE, RAID_BRING_UNDER = 500, 46
 local RAID_PLAYER_GAP = 58
+local RAID_HITBOX_SIZE = 22
 local RAID_FAST_ATTACK = 0.016
 local RAID_CHIP_BUY_DELAY, RAID_START_DELAY = 1, 1
 local RAID_SPEED_PAD, RAID_SPEED_COMBAT = 120, 180
@@ -1230,7 +1232,7 @@ local function resolveSendHits()
 		if registerAttack and registerHit then
 			sendHitsToServer = function(hitPart, hitList)
 				registerAttack:FireServer(0)
-				registerHit:FireServer(hitPart, hitList or { { hitPart, hitPart } })
+				registerHit:FireServer(hitPart, hitList or { { hitPart, hitPart } }, nil, fakeHitId)
 			end
 		end
 	end
@@ -1373,6 +1375,32 @@ local function getFruitBeliValue(fruitName)
 	end
 	return math.huge
 end
+local function hasFruitToolNamed(fruitName)
+	if not fruitName then return false, nil end
+	local key = normalizeFruitKey(fruitName)
+	for _, container in ipairs({ LocalPlayer.Backpack, getCharacter() }) do
+		if container then
+			for _, item in container:GetChildren() do
+				if item:IsA("Tool") and not item:GetAttribute("WeaponType") then
+					local storageName = getFruitStorageName(item)
+					if storageName and normalizeFruitKey(storageName) == key then
+						return true, item
+					end
+				end
+			end
+		end
+	end
+	return false, nil
+end
+local function equipFruitToolNamed(fruitName)
+	local found, tool = hasFruitToolNamed(fruitName)
+	if not found or not tool then return nil end
+	local humanoid = getHumanoid()
+	if humanoid and tool.Parent ~= getCharacter() then
+		pcall(function() humanoid:EquipTool(tool) end)
+	end
+	return tool
+end
 local function getLowestChipFruitInfo()
 	local advanced = isAdvancedRaidName(selectedRaid)
 	local minValue = advanced and 1000000 or 0
@@ -1380,11 +1408,25 @@ local function getLowestChipFruitInfo()
 	local bestName, bestValue = nil, math.huge
 	local function consider(name, price)
 		if type(name) ~= "string" or name == "" then return end
-		price = price or getFruitBeliValue(name)
+		price = tonumber(price) or getFruitBeliValue(name)
 		if fruitPriceByName[name] then price = fruitPriceByName[name] end
 		if type(price) == "number" then fruitPriceByName[name] = price end
 		if price >= minValue and price < maxValue and price < bestValue then
 			bestName, bestValue = name, price
+		end
+	end
+	local ok, inv = invokeCommF("getInventory")
+	if ok and type(inv) == "table" then
+		for _, entry in pairs(inv) do
+			if type(entry) == "table" and entry.Type == "Blox Fruit" then
+				consider(entry.Name or entry.FruitName, entry.Value or entry.Price)
+			end
+		end
+	end
+	local okFruits, fruits = invokeCommF("getInventoryFruits")
+	if okFruits and type(fruits) == "table" then
+		for _, entry in pairs(fruits) do
+			if type(entry) == "table" then consider(entry.Name, entry.Price or entry.Value) end
 		end
 	end
 	for _, container in ipairs({ LocalPlayer.Backpack, getCharacter() }) do
@@ -1398,32 +1440,31 @@ local function getLowestChipFruitInfo()
 			end
 		end
 	end
-	local ok, fruits = invokeCommF("getInventoryFruits")
-	if ok and type(fruits) == "table" then
-		for _, entry in pairs(fruits) do
-			if type(entry) == "table" then consider(entry.Name, entry.Price) end
-		end
-	end
 	return bestName, bestValue
-end
-local function getLoadedFruitName()
-	local tool = getFruitToolInInventory()
-	return tool and getFruitStorageName(tool) or nil
 end
 local function raidBuyChipBeli()
 	if not selectedRaid then lastRaidAction = "Buy: select a raid"; return false end
 	if hasMicrochip() then lastRaidAction = "Buy: already have chip"; return false end
 	if isRaidActive() or isNearAnyRaidIsland() then lastRaidAction = "Buy: wait for raid to end"; return false end
 	if not getRaidSea() then lastRaidAction = "Buy: need Sea 2 or 3"; return false end
+	pendingRaidFruitLoad = nil
 	local humanoid = getHumanoid()
 	if humanoid then pcall(function() humanoid:UnequipTools() end) end
+	local fruitTool = getFruitToolInInventory()
+	if fruitTool and fruitTool.Parent == getCharacter() then
+		lastRaidAction = "Buy: unequipping fruit for beli payment..."
+		return false
+	end
 	lastRaidAction = "Buy: purchasing " .. selectedRaid .. " chip (beli)..."
 	invokeCommF("RaidsNpc", "Select", selectedRaid)
+	if not hasMicrochip() then
+		invokeCommF("RaidsNpc", "Select", selectedRaid, "Money")
+	end
 	if hasMicrochip() then
 		lastRaidAction = "Buy: chip acquired (beli)"
 		return true
 	end
-	lastRaidAction = "Buy: waiting for chip..."
+	lastRaidAction = "Buy: beli payment pending (need 100k + lvl 1100)..."
 	return false
 end
 local function raidBuyChipFruit()
@@ -1434,22 +1475,29 @@ local function raidBuyChipFruit()
 	local fruitName, fruitValue = getLowestChipFruitInfo()
 	previewChipFruitName, previewChipFruitValue = fruitName, fruitValue
 	if not fruitName then
-		lastRaidAction = isAdvancedRaidName(selectedRaid) and "Buy: need fruit worth 1M+" or "Buy: no fruit in inventory"
+		lastRaidAction = isAdvancedRaidName(selectedRaid) and "Buy: need fruit worth 1M+ in bag" or "Buy: no fruit in bag"
 		return false
 	end
-	local loaded = getLoadedFruitName()
-	if not loaded or normalizeFruitKey(loaded) ~= normalizeFruitKey(fruitName) then
-		lastRaidAction = string.format("Buy: loading %s ($%s)", fruitName, tostring(fruitValue or "?"))
-		invokeCommF("LoadFruit", fruitName)
+	if not hasFruitToolNamed(fruitName) then
+		if pendingRaidFruitLoad ~= fruitName or tick() - lastFruitLoadTick >= 1.5 then
+			pendingRaidFruitLoad = fruitName
+			lastFruitLoadTick = tick()
+			lastRaidAction = string.format("Buy: pulling %s from bag ($%s)...", fruitName, tostring(fruitValue or "?"))
+			invokeCommF("LoadFruit", fruitName)
+		else
+			lastRaidAction = string.format("Buy: waiting for %s to load...", fruitName)
+		end
 		return false
 	end
+	pendingRaidFruitLoad = nil
+	equipFruitToolNamed(fruitName)
 	lastRaidAction = string.format("Buy: purchasing %s chip with %s ($%s)", selectedRaid, fruitName, tostring(fruitValue or "?"))
 	invokeCommF("RaidsNpc", "Select", selectedRaid)
 	if hasMicrochip() then
 		lastRaidAction = "Buy: chip acquired (" .. fruitName .. ")"
 		return true
 	end
-	lastRaidAction = "Buy: waiting for chip..."
+	lastRaidAction = "Buy: fruit payment pending..."
 	return false
 end
 local function raidAutoStart()
@@ -1498,24 +1546,54 @@ local function equipWeaponByType(weaponType)
 end
 local function attackAllMobs(mobs)
 	if #mobs == 0 then return end
-	equipWeaponByType(attackSettings.weaponType)
-	local hitList, primaryHead = {}, nil
-	for _, mob in mobs do
-		if isAliveMob(mob) then
-			local head = mob.Head
-			table.insert(hitList, { mob, head })
-			if not primaryHead then primaryHead = head end
+	local tool = equipWeaponByType(attackSettings.weaponType)
+	if not tool then return end
+	if tool.ToolTip == "Blox Fruit" then
+		local leftClick = tool:FindFirstChild("LeftClickRemote")
+		if leftClick and leftClick:IsA("RemoteEvent") then
+			pcall(function()
+				leftClick:FireServer(Vector3.new(0, -500, 0), 1, true)
+				leftClick:FireServer(false)
+			end)
+			return
 		end
 	end
-	if #hitList == 0 or not primaryHead then return end
+	local hitList, primaryHit = {}, nil
+	for _, mob in mobs do
+		if isAliveMob(mob) then
+			local hitPart = mob:FindFirstChild("Head") or mob.HumanoidRootPart
+			if hitPart then
+				table.insert(hitList, { mob, hitPart })
+				if not primaryHit then primaryHit = hitPart end
+			end
+		end
+	end
+	if #hitList == 0 or not primaryHit then return end
 	local registerAttack, registerHit = getRaidNetRemotes()
 	if not registerAttack or not registerHit then return end
 	registerAttack:FireServer(0)
 	local hitsFn = resolveSendHits()
 	if attackSettings.attackMode == "Fast" and hitsFn then
-		pcall(hitsFn, primaryHead, hitList)
-	else
-		registerHit:FireServer(primaryHead, hitList)
+		pcall(hitsFn, primaryHit, hitList)
+	end
+	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
+end
+local function expandRaidMobHitbox(mob, playerHrp)
+	if not mob or not playerHrp then return end
+	local head = mob:FindFirstChild("Head")
+	local mobRoot = mob:FindFirstChild("HumanoidRootPart")
+	if not head or not mobRoot then return end
+	local hitSize = Vector3.new(RAID_HITBOX_SIZE, RAID_HITBOX_SIZE, RAID_HITBOX_SIZE)
+	head.Size = hitSize
+	head.CanCollide = false
+	head.Massless = true
+	head.Transparency = 1
+	mobRoot.Size = Vector3.new(RAID_HITBOX_SIZE * 0.8, RAID_HITBOX_SIZE * 0.6, RAID_HITBOX_SIZE * 0.8)
+	mobRoot.CanCollide = false
+	local towardPlayer = playerHrp.Position - mobRoot.Position
+	if towardPlayer.Magnitude > 0.1 then
+		local reach = math.min(RAID_PLAYER_GAP * 0.9, towardPlayer.Magnitude)
+		head.CFrame = CFrame.new(mobRoot.Position + towardPlayer.Unit * reach)
 	end
 end
 local function bringMobsUnderPlayer(mobs)
@@ -1529,8 +1607,8 @@ local function bringMobsUnderPlayer(mobs)
 		local angle = (index / math.max(#mobs, 1)) * math.pi * 2
 		local ring = 6 + ((index - 1) % 4) * 5
 		local offset = Vector3.new(math.cos(angle) * ring, -RAID_BRING_UNDER, math.sin(angle) * ring)
-		local targetCf = CFrame.new(anchor + offset)
-		mobRoot.CFrame = targetCf
+		local targetPos = anchor + offset
+		mobRoot.CFrame = CFrame.new(targetPos)
 		mobRoot.AssemblyLinearVelocity = Vector3.zero
 		mobRoot.AssemblyAngularVelocity = Vector3.zero
 		local lock = mobRoot:FindFirstChild("PSG_RaidBring")
@@ -1542,7 +1620,8 @@ local function bringMobsUnderPlayer(mobs)
 			lock.D = 900
 			lock.Parent = mobRoot
 		end
-		lock.Position = anchor + offset
+		lock.Position = targetPos
+		expandRaidMobHitbox(mob, hrp)
 	end
 end
 local function getRaidMobsNearPlayer(islandPart)
@@ -1566,7 +1645,8 @@ local function holdCombatHover(islandPart)
 	local hrp = getRootPart()
 	if not hrp or not islandPart then return end
 	local hoverPos = islandPart.Position + Vector3.new(0, RAID_HOVER_HEIGHT, 0)
-	hrp.CFrame = CFrame.new(hoverPos)
+	local lookAt = hrp.Position + Vector3.new(0, -RAID_PLAYER_GAP, 0)
+	hrp.CFrame = CFrame.new(hoverPos, lookAt)
 	hrp.AssemblyLinearVelocity = Vector3.zero
 	hrp.AssemblyAngularVelocity = Vector3.zero
 	if movementTweenPart then movementTweenPart.CFrame = hrp.CFrame end
@@ -2151,7 +2231,13 @@ local toggleBuyBeli = createToggleRow(raidsScroll, "Buy Chip (Beli)", false, fun
 		raidBuyFruit = false
 		toggleBuyFruit.Set(false, true)
 	end
-	if v then ensureMovementTweenPart() end
+	if v then
+		pendingRaidFruitLoad = nil
+		ensureMovementTweenPart()
+		local humanoid = getHumanoid()
+		if humanoid then pcall(function() humanoid:UnequipTools() end) end
+		lastRaidAction = "Beli buy ON — paying with 100k beli"
+	end
 end, 4)
 local toggleBuyFruit = createToggleRow(raidsScroll, "Buy Chip (Lowest Fruit)", false, function(v)
 	raidBuyFruit = v
@@ -2165,9 +2251,9 @@ local toggleBuyFruit = createToggleRow(raidsScroll, "Buy Chip (Lowest Fruit)", f
 		previewChipFruitName = fruitName
 		previewChipFruitValue = fruitValue
 		if fruitName then
-			lastRaidAction = string.format("Fruit buy ON — lowest: %s ($%s)", fruitName, tostring(fruitValue or "?"))
+			lastRaidAction = string.format("Fruit buy ON — lowest in bag: %s ($%s)", fruitName, tostring(fruitValue or "?"))
 		else
-			lastRaidAction = "Fruit buy ON — no eligible fruit found yet"
+			lastRaidAction = "Fruit buy ON — no eligible fruit in bag yet"
 		end
 	else
 		previewChipFruitName = nil
