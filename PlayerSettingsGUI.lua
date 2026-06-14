@@ -180,6 +180,10 @@ local normalStockLabel, mirageStockLabel, stockDirty = nil, nil, true
 local storeFruitBlocklist, lastTeleportMessage = {}, ""
 local activeHrpTween = nil
 local SEA_PLACE_IDS = { [1] = 2753915549, [2] = 4442272183, [3] = 7449423635 }
+local SEA3_MAP_MARKERS = { "Boat Castle", "Castle on the Sea", "Mansion", "Hydra Island", "Floating Turtle", "Tiki Outpost", "Great Tree", "Port Town" }
+local SEA2_MAP_MARKERS = { "CircleIsland", "Hot and Cold", "HotAndCold", "Cursed Ship", "Ice Castle", "Forgotten Island", "The Cafe", "Green Zone" }
+local SEA3_LOCATION_MARKERS = { "Castle On The Sea", "Mansion", "Hydra Island", "Floating Turtle", "Tiki Outpost", "Great Tree", "Port Town" }
+local SEA2_LOCATION_MARKERS = { "The Cafe", "Cursed Ship", "Ice Castle", "Forgotten Island", "Ussop Island", "Green Zone", "Zombie Island" }
 local FALLBACK_ISLANDS = {
 	[1] = { "WindMill", "Marine", "Middle Town", "Jungle", "Pirate Village", "Desert", "Snow Island", "MarineFord", "Colosseum", "Sky Island 1", "Sky Island 2", "Sky Island 3", "Prison", "Magma Village", "Under Water Island", "Fountain City", "Shank Room", "Mob Island" },
 	[2] = { "The Cafe", "Frist Spot", "Dark Area", "Flamingo Mansion", "Flamingo Room", "Green Zone", "Factory", "Colossuim", "Zombie Island", "Two Snow Mountain", "Punk Hazard", "Cursed Ship", "Ice Castle", "Forgotten Island", "Ussop Island", "Mini Sky Island" },
@@ -357,11 +361,63 @@ local function getCurrentTeamLabel()
 	end
 	return "Unknown"
 end
-local function getCurrentSeaNumber()
-	for sea, placeId in SEA_PLACE_IDS do
-		if game.PlaceId == placeId then return sea end
+local function mapHasRaidSummon(map, zoneNames)
+	if not map then return false end
+	for _, zoneName in zoneNames do
+		local zone = map:FindFirstChild(zoneName)
+		if zone and zone:FindFirstChild("RaidSummon2", true) then
+			return true
+		end
 	end
-	return 1
+	return false
+end
+local function getSeaFromMap()
+	local map = workspace:FindFirstChild("Map")
+	if map then
+		if mapHasRaidSummon(map, { "Boat Castle", "Castle on the Sea" }) then
+			return 3
+		end
+		if mapHasRaidSummon(map, { "CircleIsland", "Hot and Cold", "HotAndCold" }) then
+			return 2
+		end
+		for _, marker in SEA3_MAP_MARKERS do
+			if map:FindFirstChild(marker) then
+				return 3
+			end
+		end
+		for _, marker in SEA2_MAP_MARKERS do
+			if map:FindFirstChild(marker) then
+				return 2
+			end
+		end
+	end
+	local locations = workspace:FindFirstChild("_WorldOrigin")
+		and workspace._WorldOrigin:FindFirstChild("Locations")
+	if locations then
+		for _, marker in SEA3_LOCATION_MARKERS do
+			if locations:FindFirstChild(marker) then
+				return 3
+			end
+		end
+		for _, marker in SEA2_LOCATION_MARKERS do
+			if locations:FindFirstChild(marker) then
+				return 2
+			end
+		end
+	end
+	return nil
+end
+local function getCurrentSeaNumber()
+	local mapSea = getSeaFromMap()
+	if mapSea == 2 or mapSea == 3 then
+		return mapSea
+	end
+	for sea, placeId in SEA_PLACE_IDS do
+		if game.PlaceId == placeId then
+			return sea
+		end
+	end
+	return mapSea or 1
 end
 local function isPrivateServer() return game.PrivateServerId ~= "" and game.PrivateServerOwnerId ~= 0 end
 local function ensureMovementTweenPart()
@@ -492,7 +548,14 @@ local function RaidHasTimer()
 end
 local function RaidIsSeaValid()
 	local sea = getCurrentSeaNumber()
-	return sea == 2 or sea == 3
+	if sea == 2 or sea == 3 then return true end
+	local map = workspace:FindFirstChild("Map")
+	if map then
+		if mapHasRaidSummon(map, { "CircleIsland", "Hot and Cold", "HotAndCold", "Boat Castle", "Castle on the Sea" }) then
+			return true
+		end
+	end
+	return false
 end
 local function RaidGetIsland(islandName)
 	local hrp = getRootPart()
@@ -1621,7 +1684,14 @@ local function RaidBuyChip()
 		return false
 	end
 	if not RaidIsSeaValid() then
-		RaidSetDiag("error", "Auto Buy Blocked", "Wrong sea", "Raids only work on Sea 2 or Sea 3. Use TP tab sea buttons.")
+		local mapSea = getSeaFromMap()
+		local detail = "Raids only work on Sea 2 or Sea 3. Use TP tab sea buttons."
+		if mapSea == 2 or mapSea == 3 then
+			detail = "Map looks like Sea " .. tostring(mapSea) .. " but raid validation failed. Try rejoining."
+		elseif game.PlaceId == SEA_PLACE_IDS[1] then
+			detail = "You are on the main Blox Fruits place but still in Sea 1 content. Travel to Sea 2 via the TP tab."
+		end
+		RaidSetDiag("error", "Auto Buy Blocked", "Wrong sea (detected Sea " .. tostring(getCurrentSeaNumber()) .. ")", detail)
 		return false
 	end
 	if not getCommF() then
