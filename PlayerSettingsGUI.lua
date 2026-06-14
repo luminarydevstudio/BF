@@ -149,6 +149,11 @@ local Raid = {
 	diagMessage = "Ready - toggle a raid option to begin.",
 	diagDetail = "",
 	farmingActive = false,
+	combatPhase = nil,
+	combatIslandIndex = 0,
+	combatTargetGroup = nil,
+	_lastDiagLog = nil,
+	_lastDiagLogAt = 0,
 }
 local RAID_LAB = {
 	[2] = CFrame.new(-5556.24316, 314.034393, -2974.21533),
@@ -172,6 +177,12 @@ local RAID_CFG = {
 	LAB_SPEED = 300,
 	CHIP_BUY_LEVEL = 1100,
 	CHIP_BELI_COST = 100000,
+	ISLAND_TRAVEL_SPEED = 165,
+	MOB_TRAVEL_SPEED = 125,
+	MOB_HOVER_Y = 42,
+	MOB_CLUSTER = 38,
+	ARRIVE_ISLAND = 40,
+	ARRIVE_MOB = 14,
 }
 local raidStatusLabel, raidSelectBtn, raidSelectedLabel, raidMenu, raidMenuLayout, raidStatsLabel
 local diagPanel, diagAccent, diagTitleLabel, diagMessageLabel, diagDetailLabel
@@ -937,6 +948,9 @@ local function RaidCleanup()
 		clearMovement(movementFollowOwner)
 	end
 	RaidSetCombatState(false)
+	Raid.combatPhase = nil
+	Raid.combatIslandIndex = 0
+	Raid.combatTargetGroup = nil
 end
 local function RaidEnabled()
 	return Raid.buyBeli or Raid.buyFruit or Raid.autoStart or Raid.autoComplete or Raid.autoAwaken
@@ -1000,7 +1014,13 @@ local function RaidSetDiag(level, title, message, detail)
 	if Raid.diagDetail ~= "" then
 		Raid.status = Raid.diagMessage .. "\n" .. Raid.diagDetail
 	end
-	HubDebug.Log("RAID", string.format("[%s] %s | %s%s", tostring(level), tostring(title), tostring(message), detail ~= "" and (" | " .. detail) or ""))
+	local diagKey = tostring(level) .. "|" .. tostring(title) .. "|" .. tostring(message) .. "|" .. tostring(detail)
+	local now = tick()
+	if Raid._lastDiagLog ~= diagKey or now - (Raid._lastDiagLogAt or 0) > 0.6 then
+		Raid._lastDiagLog = diagKey
+		Raid._lastDiagLogAt = now
+		HubDebug.Log("RAID", string.format("[%s] %s | %s%s", tostring(level), tostring(title), tostring(message), detail ~= "" and (" | " .. detail) or ""))
+	end
 end
 local function RaidRefreshDiagUI()
 	if not diagMessageLabel then return end
@@ -1133,7 +1153,7 @@ local function syncMovementTween(dt)
 	local step = speed * dt
 	local alpha = dist > 0 and math.clamp(step / dist, 0, 1) or 1
 	if movementFollowOwner == "raid" or movementFollowOwner == "raid_pad" or movementFollowOwner == "raid_lab" then
-		alpha = math.min(alpha, 0.18)
+		alpha = math.min(alpha, 0.14)
 	end
 	local nextCf = current:Lerp(goal, alpha)
 	movementTweenPart.CFrame = nextCf
@@ -2089,16 +2109,123 @@ local function RaidGetMobs(islandPart)
 	if not hrp then return results end
 	local enemies = workspace:FindFirstChild("Enemies")
 	if not enemies then return results end
+	local scanCenter = hrp.Position
+	if islandPart then
+		local islandCf = RaidIslandCFrame(islandPart)
+		if islandCf then
+			scanCenter = islandCf.Position
+		end
+	end
 	local scanRange = RAID_CFG.COMBAT_RANGE
 	for _, mob in enemies:GetChildren() do
 		if RaidAliveMob(mob) then
 			local root = mob.HumanoidRootPart
-			if (root.Position - hrp.Position).Magnitude <= scanRange then
+			if (root.Position - scanCenter).Magnitude <= scanRange then
 				table.insert(results, mob)
 			end
 		end
 	end
 	return results
+end
+local function RaidFilterAliveMobs(mobs)
+	local alive = {}
+	for _, mob in mobs do
+		if RaidAliveMob(mob) then
+			table.insert(alive, mob)
+		end
+	end
+	return alive
+end
+local function RaidGroupCenter(group)
+	local sum = Vector3.zero
+	local count = 0
+	for _, mob in group do
+		if RaidAliveMob(mob) then
+			sum += mob.HumanoidRootPart.Position
+			count += 1
+		end
+	end
+	if count == 0 then return nil end
+	return sum / count
+end
+local function RaidClusterMobs(mobs, radius)
+	radius = radius or RAID_CFG.MOB_CLUSTER
+	local used, groups = {}, {}
+	for _, mob in mobs do
+		if not used[mob] and RaidAliveMob(mob) then
+			local group = { mob }
+			used[mob] = true
+			local anchor = mob.HumanoidRootPart.Position
+			for _, other in mobs do
+				if not used[other] and RaidAliveMob(other) then
+					if (other.HumanoidRootPart.Position - anchor).Magnitude <= radius then
+						table.insert(group, other)
+						used[other] = true
+					end
+				end
+			end
+			table.insert(groups, group)
+		end
+	end
+	local hrp = getRootPart()
+	if hrp then
+		table.sort(groups, function(a, b)
+			local centerA = RaidGroupCenter(a)
+			local centerB = RaidGroupCenter(b)
+			if not centerA or not centerB then return false end
+			return (centerA - hrp.Position).Magnitude < (centerB - hrp.Position).Magnitude
+		end)
+	end
+	return groups
+end
+local function RaidHoverCFrameAbove(position)
+	local hover = position + Vector3.new(0, RAID_CFG.MOB_HOVER_Y, 0)
+	return CFrame.new(hover, position)
+end
+local function RaidDistanceToCFrame(cf)
+	local hrp = getRootPart()
+	if not hrp or not cf then return math.huge end
+	return (hrp.Position - cf.Position).Magnitude
+end
+local function RaidPerformHits(mobs)
+	if #mobs == 0 then return false end
+	local tool = RaidEquipWeapon()
+	if not tool then
+		RaidSetDiag("error", "Auto Complete Blocked", "Equip a " .. tostring(attackSettings.weaponType) .. " weapon", "Open A-Set tab and pick your weapon type.")
+		return false
+	end
+	local hitList, primaryHit = {}, nil
+	for _, mob in mobs do
+		if RaidAliveMob(mob) then
+			local mobRoot = mob.HumanoidRootPart
+			local hitPart = mob:FindFirstChild("Head") or mobRoot
+			if hitPart then
+				table.insert(hitList, { mob, hitPart })
+				primaryHit = primaryHit or hitPart
+			end
+		end
+	end
+	if #hitList == 0 or not primaryHit then return false end
+	local registerAttack, registerHit = RaidGetNetRemotes()
+	if not registerAttack or not registerHit then
+		RaidSetDiag("error", "Auto Complete Blocked", "Attack remotes missing", "Rejoin the server if combat never starts.")
+		return false
+	end
+	if tool.ToolTip == "Blox Fruit" then
+		local leftClick = tool:FindFirstChild("LeftClickRemote")
+		if leftClick and leftClick:IsA("RemoteEvent") then
+			pcall(function()
+				leftClick:FireServer(Vector3.new(0, -8, 0), #hitList, true)
+				leftClick:FireServer(false)
+			end)
+		end
+	end
+	pcall(function() tool:Activate() end)
+	registerAttack:FireServer(0)
+	local hitsFn = resolveSendHits()
+	if hitsFn then pcall(hitsFn, primaryHit, hitList) end
+	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
+	return true
 end
 local function RaidGetHitPart(mob, mobRoot)
 	local hit = mobRoot:FindFirstChild("PSG_RaidHit")
@@ -2171,43 +2298,7 @@ local function RaidBringMobs(mobs, dt)
 	end
 end
 local function RaidAttackMobs(mobs)
-	if #mobs == 0 then return end
-	local tool = RaidEquipWeapon()
-	if not tool then
-		RaidSetDiag("error", "Auto Complete Blocked", "Equip a " .. tostring(attackSettings.weaponType) .. " weapon", "Open A-Set tab and pick your weapon type.")
-		return
-	end
-	local hitList, primaryHit = {}, nil
-	for _, mob in mobs do
-		if RaidAliveMob(mob) then
-			local mobRoot = mob.HumanoidRootPart
-			local hitPart = mobRoot:FindFirstChild("PSG_RaidHit") or mob:FindFirstChild("Head") or mobRoot
-			if hitPart then
-				table.insert(hitList, { mob, hitPart })
-				primaryHit = primaryHit or hitPart
-			end
-		end
-	end
-	if #hitList == 0 or not primaryHit then return end
-	local registerAttack, registerHit = RaidGetNetRemotes()
-	if not registerAttack or not registerHit then
-		RaidSetDiag("error", "Auto Complete Blocked", "Attack remotes missing", "Rejoin the server if combat never starts.")
-		return
-	end
-	if tool.ToolTip == "Blox Fruit" then
-		local leftClick = tool:FindFirstChild("LeftClickRemote")
-		if leftClick and leftClick:IsA("RemoteEvent") then
-			pcall(function()
-				leftClick:FireServer(Vector3.new(0, -RAID_CFG.PLAYER_GAP, 0), #hitList, true)
-				leftClick:FireServer(false)
-			end)
-		end
-	end
-	pcall(function() tool:Activate() end)
-	registerAttack:FireServer(0)
-	local hitsFn = resolveSendHits()
-	if hitsFn then pcall(hitsFn, primaryHit, hitList) end
-	registerHit:FireServer(primaryHit, hitList, nil, fakeHitId)
+	return RaidPerformHits(mobs)
 end
 local function RaidHoverIsland(islandPart, dt)
 	local hrp = getRootPart()
@@ -2257,50 +2348,39 @@ local function RaidKillAura()
 		killEnemy(child)
 	end
 end
-local function RaidAttackNearbyMobs()
-	local mobs = RaidGetMobs(nil)
+local function RaidAttackNearbyMobs(islandPart)
+	local mobs = RaidFilterAliveMobs(RaidGetMobs(islandPart))
 	if #mobs == 0 then return false end
-	RaidBringMobs(mobs, 1 / 30)
-	RaidAttackMobs(mobs)
-	return true
+	return RaidPerformHits(mobs)
 end
-local function RaidCompleteStep()
+local function RaidResetCombatState()
+	Raid.combatPhase = nil
+	Raid.combatIslandIndex = 0
+	Raid.combatTargetGroup = nil
+	Raid.attackAccum = 0
+	if movementFollowOwner == "raid" then
+		clearMovement("raid")
+	end
+	RaidSetCombatState(false)
+end
+local function RaidCombatTick(dt)
 	if not Raid.autoComplete then
 		Raid.farmingActive = false
+		RaidResetCombatState()
 		return
 	end
 	if not RaidHasTimer() then
 		Raid.farmingActive = false
+		RaidResetCombatState()
 		return
 	end
-	clearMovement(nil)
+	dt = dt or 0.05
 	setNoclip(true)
+	RaidSetCombatState(true)
 	RaidEquipWeapon()
 	RaidTryFruitTransform()
 	local targetIsland, islandIndex = RaidGetHighestIsland()
-	if targetIsland then
-		local cf = RaidIslandCFrame(targetIsland)
-		if cf then
-			RaidPivotTo(cf + Vector3.new(0, RAID_CFG.HOVER_Y, 0))
-		end
-		Raid.farmingActive = true
-		local tool = getCharacter() and getCharacter():FindFirstChildOfClass("Tool")
-		if tool then pcall(function() tool:Activate() end) end
-		local usedAura = typeof(sethiddenproperty) == "function"
-		if usedAura then
-			RaidKillAura()
-		end
-		local usedHits = RaidAttackNearbyMobs()
-		local mode = usedAura and (usedHits and "aura+hits" or "aura only") or (usedHits and "register hits" or "no mobs in range")
-		local logKey = tostring(islandIndex) .. "|" .. mode
-		local now = tick()
-		if Raid._lastCompleteLog ~= logKey or now - (Raid._lastCompleteLogAt or 0) > 3 then
-			Raid._lastCompleteLog = logKey
-			Raid._lastCompleteLogAt = now
-			HubDebug.Log("RAID", "Complete: island=" .. tostring(islandIndex) .. " mode=" .. mode)
-		end
-		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | %s", islandIndex, mode), usedAura and "SimulationRadius active" or "Executor missing sethiddenproperty - using RegisterHit fallback")
-	else
+	if not targetIsland then
 		Raid.farmingActive = false
 		local now = tick()
 		if now - (Raid._lastCompleteLogAt or 0) > 3 then
@@ -2308,6 +2388,110 @@ local function RaidCompleteStep()
 			HubDebug.Log("RAID", "Complete: timer on but no island within range")
 		end
 		RaidSetDiag("busy", "Auto Complete", "Raid timer on but no island found", "Stand on a raid island or wait for Island 1-5 within 3000 studs")
+		return
+	end
+	if Raid.combatIslandIndex ~= islandIndex then
+		Raid.combatPhase = "travel_island"
+		Raid.combatTargetGroup = nil
+		Raid.combatIslandIndex = islandIndex
+	end
+	Raid.farmingActive = true
+	local phase = Raid.combatPhase or "travel_island"
+	if phase == "travel_island" then
+		local islandCf = RaidIslandCFrame(targetIsland)
+		if not islandCf then
+			Raid.combatPhase = "seek_target"
+			return
+		end
+		local goal = islandCf + Vector3.new(0, RAID_CFG.HOVER_Y, 0)
+		local dist = RaidDistanceToCFrame(goal)
+		if dist > RAID_CFG.ARRIVE_ISLAND then
+			smoothFlyTo(goal, RAID_CFG.ISLAND_TRAVEL_SPEED, "raid")
+			RaidSetDiag("busy", "Auto Complete", string.format("Tweening to Island %d", islandIndex), string.format("%.0f studs away at %d speed", dist, RAID_CFG.ISLAND_TRAVEL_SPEED))
+		else
+			clearMovement("raid")
+			Raid.combatPhase = "seek_target"
+			HubDebug.Log("RAID", "Complete: arrived island " .. tostring(islandIndex))
+		end
+		return
+	end
+	if phase == "seek_target" then
+		local aliveMobs = RaidFilterAliveMobs(RaidGetMobs(targetIsland))
+		if #aliveMobs == 0 then
+			Raid.combatPhase = "travel_island"
+			RaidSetDiag("busy", "Auto Complete", string.format("Island %d cleared — waiting", islandIndex), "Watching for remaining mobs or the next island")
+			return
+		end
+		local groups = RaidClusterMobs(aliveMobs)
+		Raid.combatTargetGroup = groups[1]
+		if not Raid.combatTargetGroup or #Raid.combatTargetGroup == 0 then
+			Raid.combatPhase = "travel_island"
+			return
+		end
+		Raid.combatPhase = "travel_mob"
+		HubDebug.Log("RAID", string.format("Complete: targeting %d mob(s) on island %d", #Raid.combatTargetGroup, islandIndex))
+		return
+	end
+	if phase == "travel_mob" then
+		local group = RaidFilterAliveMobs(Raid.combatTargetGroup or {})
+		Raid.combatTargetGroup = group
+		if #group == 0 then
+			Raid.combatPhase = "seek_target"
+			return
+		end
+		local center = RaidGroupCenter(group)
+		if not center then
+			Raid.combatPhase = "seek_target"
+			return
+		end
+		local hoverCf = RaidHoverCFrameAbove(center)
+		local dist = RaidDistanceToCFrame(hoverCf)
+		if dist > RAID_CFG.ARRIVE_MOB then
+			smoothFlyTo(hoverCf, RAID_CFG.MOB_TRAVEL_SPEED, "raid")
+			RaidSetDiag("busy", "Auto Complete", string.format("Island %d | flying to %d mob(s)", islandIndex, #group), string.format("%.0f studs above target", dist))
+		else
+			clearMovement("raid")
+			Raid.combatPhase = "attack"
+			Raid.attackAccum = 0
+		end
+		return
+	end
+	if phase == "attack" then
+		local group = RaidFilterAliveMobs(Raid.combatTargetGroup or {})
+		Raid.combatTargetGroup = group
+		if #group == 0 then
+			Raid.combatPhase = "seek_target"
+			HubDebug.Log("RAID", "Complete: mob group defeated")
+			return
+		end
+		local center = RaidGroupCenter(group)
+		if center then
+			local hrp = getRootPart()
+			if hrp then
+				local hover = center + Vector3.new(0, RAID_CFG.MOB_HOVER_Y, 0)
+				hrp.CFrame = CFrame.new(hover, center)
+				hrp.AssemblyLinearVelocity = Vector3.zero
+				hrp.AssemblyAngularVelocity = Vector3.zero
+				if movementTweenPart then
+					movementTweenPart.CFrame = hrp.CFrame
+				end
+			end
+		end
+		local attackInterval = attackSettings.attackMode == "Fast" and RAID_CFG.FAST_ATTACK or RAID_CFG.NORMAL_ATTACK
+		Raid.attackAccum += dt
+		if Raid.attackAccum >= attackInterval then
+			Raid.attackAccum = 0
+			RaidPerformHits(group)
+		end
+		local mode = #group > 1 and ("player hits x" .. tostring(#group)) or "player hits x1"
+		local logKey = tostring(islandIndex) .. "|" .. mode .. "|" .. tostring(#group)
+		local now = tick()
+		if Raid._lastCompleteLog ~= logKey or now - (Raid._lastCompleteLogAt or 0) > 3 then
+			Raid._lastCompleteLog = logKey
+			Raid._lastCompleteLogAt = now
+			HubDebug.Log("RAID", "Complete: island=" .. tostring(islandIndex) .. " mode=" .. mode)
+		end
+		RaidSetDiag("ok", "Auto Complete", string.format("Island %d | %s", islandIndex, mode), "Tween above each mob group — no kill aura")
 	end
 end
 local function RaidTryAwaken()
@@ -2344,6 +2528,8 @@ HubDebugCollectSnapshot = function()
 		weapon = attackSettings.weaponType,
 		activeTab = activeTab,
 		diag = Raid.diagMessage,
+		combatPhase = Raid.combatPhase,
+		combatMobs = Raid.combatTargetGroup and #RaidFilterAliveMobs(Raid.combatTargetGroup) or 0,
 	}
 end
 local function HubDebugMaybeSnapshot(label)
@@ -2360,6 +2546,9 @@ local function RaidUpdateSession()
 	local timerVisible = RaidHasTimer()
 	if timerVisible and not Raid.hadTimer then
 		Raid.attackAccum = 0
+		Raid.combatPhase = "travel_island"
+		Raid.combatIslandIndex = 0
+		Raid.combatTargetGroup = nil
 		clearMovement("raid_pad")
 		clearMovement("raid")
 		syncMovementPartToPlayer()
@@ -3292,12 +3481,13 @@ task.spawn(function()
 	while alive do
 		task.wait()
 		if Raid.autoComplete and RaidHasTimer() then
-			local ok, err = pcall(RaidCompleteStep)
+			local ok, err = pcall(RaidCombatTick, 0.05)
 			if not ok then
 				HubDebug.LogError("RAID_COMPLETE", err)
 			end
 		elseif not Raid.autoComplete then
 			Raid.farmingActive = false
+			RaidResetCombatState()
 		end
 	end
 end)
