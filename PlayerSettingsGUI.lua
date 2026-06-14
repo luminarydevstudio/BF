@@ -112,7 +112,7 @@ local HUB_DEBUG_VAR_MAX = 20
 local HubDebug = {
 	entries = {},
 	varSnapshots = {},
-	enabled = true,
+	enabled = false,
 	logLabel = nil,
 	logScroll = nil,
 	statusLabel = nil,
@@ -177,8 +177,8 @@ local RAID_CFG = {
 	LAB_SPEED = 300,
 	CHIP_BUY_LEVEL = 1100,
 	CHIP_BELI_COST = 100000,
-	ISLAND_TRAVEL_SPEED = 165,
-	MOB_TRAVEL_SPEED = 125,
+	ISLAND_TRAVEL_SPEED = 330,
+	MOB_TRAVEL_SPEED = 250,
 	MOB_HOVER_Y = 42,
 	MOB_CLUSTER = 38,
 	ARRIVE_ISLAND = 40,
@@ -359,6 +359,7 @@ function HubDebug.Log(category, message)
 	HubDebugRefreshUI()
 end
 function HubDebug.LogError(category, err)
+	if not HubDebug.enabled then return end
 	HubDebug.Log("ERROR", string.format("[%s] %s", tostring(category), tostring(err)))
 end
 function HubDebug.LogVars(label, data)
@@ -611,6 +612,7 @@ local function getCurrentSeaNumber()
 	return mapSea or 1
 end
 local function isPrivateServer() return game.PrivateServerId ~= "" and game.PrivateServerOwnerId ~= 0 end
+local syncNoclipState
 local function ensureMovementTweenPart()
 	if movementTweenPart and movementTweenPart.Parent then return movementTweenPart end
 	local hrp = getRootPart()
@@ -1097,7 +1099,7 @@ local function RaidExplainBuyBlockers()
 	end
 	return checks
 end
-local function syncNoclipState()
+syncNoclipState = function()
 	local shouldNoclip = movementFollowOwner ~= nil and (
 		(movementFollowOwner == "island" and teleportToIslandEnabled)
 		or (movementFollowOwner == "fruit" and autoTweenFruit)
@@ -2533,6 +2535,7 @@ HubDebugCollectSnapshot = function()
 	}
 end
 local function HubDebugMaybeSnapshot(label)
+	if not HubDebug.enabled then return end
 	local now = tick()
 	if not label and now - HubDebug.lastVarAt < HubDebug.varInterval then
 		return
@@ -3096,7 +3099,24 @@ local debugBtnRow = Instance.new("Frame"); debugBtnRow.Name = "DebugButtons"; de
 local btnCopyReport = makeButton(debugBtnRow, "Copy Report", COLORS.accent, UDim2.fromOffset(108, 28)); btnCopyReport.Position = UDim2.fromOffset(0, 0)
 local btnClearLog = makeButton(debugBtnRow, "Clear", COLORS.surfaceAlt, UDim2.fromOffset(72, 28)); btnClearLog.Position = UDim2.fromOffset(116, 0)
 local btnSnapNow = makeButton(debugBtnRow, "Snapshot", COLORS.surfaceAlt, UDim2.fromOffset(84, 28)); btnSnapNow.Position = UDim2.fromOffset(196, 0)
-HubDebug.statusLabel = Instance.new("TextLabel"); HubDebug.statusLabel.Size = UDim2.new(1, 0, 0, 16); HubDebug.statusLabel.Position = UDim2.fromOffset(0, 94); HubDebug.statusLabel.BackgroundTransparency = 1; HubDebug.statusLabel.Font = Enum.Font.Gotham; HubDebug.statusLabel.TextSize = 9; HubDebug.statusLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.statusLabel.TextColor3 = COLORS.textMuted; HubDebug.statusLabel.Text = "Ready — run raids or toggles to populate the log."; HubDebug.statusLabel.Parent = debugPanel
+local btnRecord = makeButton(debugBtnRow, "Record OFF", COLORS.surfaceAlt, UDim2.fromOffset(92, 28)); btnRecord.Position = UDim2.fromOffset(288, 0)
+HubDebug.statusLabel = Instance.new("TextLabel"); HubDebug.statusLabel.Size = UDim2.new(1, 0, 0, 16); HubDebug.statusLabel.Position = UDim2.fromOffset(0, 94); HubDebug.statusLabel.BackgroundTransparency = 1; HubDebug.statusLabel.Font = Enum.Font.Gotham; HubDebug.statusLabel.TextSize = 9; HubDebug.statusLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.statusLabel.TextColor3 = COLORS.textMuted; HubDebug.statusLabel.Text = "Recording OFF — toggle Record to capture logs."; HubDebug.statusLabel.Parent = debugPanel
+local function setDebugRecording(on)
+	HubDebug.enabled = on
+	btnRecord.Text = on and "Record ON" or "Record OFF"
+	btnRecord.BackgroundColor3 = on and COLORS.accent or COLORS.surfaceAlt
+	if HubDebug.statusLabel then
+		HubDebug.statusLabel.Text = on and "Recording ON — events will be logged." or "Recording OFF — toggle Record to capture logs."
+		HubDebug.statusLabel.TextColor3 = on and COLORS.success or COLORS.textMuted
+	end
+end
+setDebugRecording(false)
+btnRecord.MouseButton1Click:Connect(function()
+	setDebugRecording(not HubDebug.enabled)
+	if HubDebug.enabled then
+		HubDebug.Log("SYS", "Debug recording started")
+	end
+end)
 HubDebug.logScroll = Instance.new("ScrollingFrame"); HubDebug.logScroll.Name = "DebugLog"; HubDebug.logScroll.Size = UDim2.new(1, 0, 1, -118); HubDebug.logScroll.Position = UDim2.fromOffset(0, 114); HubDebug.logScroll.BackgroundColor3 = COLORS.bg; HubDebug.logScroll.BorderSizePixel = 0; HubDebug.logScroll.ScrollBarThickness = 4; HubDebug.logScroll.ScrollBarImageColor3 = COLORS.accent; HubDebug.logScroll.CanvasSize = UDim2.fromOffset(0, 0); HubDebug.logScroll.Parent = debugPanel
 makeCorner(HubDebug.logScroll, 6)
 HubDebug.logLabel = Instance.new("TextLabel"); HubDebug.logLabel.Name = "LogText"; HubDebug.logLabel.Size = UDim2.new(1, -12, 0, 0); HubDebug.logLabel.Position = UDim2.fromOffset(6, 6); HubDebug.logLabel.BackgroundTransparency = 1; HubDebug.logLabel.Font = Enum.Font.Code; HubDebug.logLabel.TextSize = 9; HubDebug.logLabel.TextXAlignment = Enum.TextXAlignment.Left; HubDebug.logLabel.TextYAlignment = Enum.TextYAlignment.Top; HubDebug.logLabel.TextWrapped = true; HubDebug.logLabel.TextColor3 = COLORS.textMuted; HubDebug.logLabel.AutomaticSize = Enum.AutomaticSize.Y; HubDebug.logLabel.Text = "(empty)"; HubDebug.logLabel.Parent = HubDebug.logScroll
@@ -3278,21 +3298,12 @@ styleSeaTravelButton(btnSea3, Color3.fromRGB(140, 90, 220))
 teleportInfo = Instance.new("TextLabel"); teleportInfo.Size = UDim2.new(1, 0, 0, 52); teleportInfo.BackgroundColor3 = COLORS.surface; teleportInfo.BorderSizePixel = 0; teleportInfo.Font = Enum.Font.Gotham; teleportInfo.TextSize = 10; teleportInfo.TextWrapped = true; teleportInfo.TextXAlignment = Enum.TextXAlignment.Left; teleportInfo.TextYAlignment = Enum.TextYAlignment.Top; teleportInfo.TextColor3 = COLORS.textMuted; teleportInfo.Text = "Smooth tween to island. Toggle off mid-travel to stop where you are. Sea buttons keep public/private server type."; teleportInfo.LayoutOrder = 6; teleportInfo.Parent = teleportScroll
 makeCorner(teleportInfo)
 local tpInfoPad = Instance.new("UIPadding"); tpInfoPad.PaddingTop = UDim.new(0, 8); tpInfoPad.PaddingLeft = UDim.new(0, 8); tpInfoPad.PaddingRight = UDim.new(0, 8); tpInfoPad.Parent = teleportInfo
-local function makeStockCard(parent, title, layoutOrder)
-	local card = Instance.new("Frame"); card.Size = UDim2.new(1, 0, 0, 132); card.BackgroundColor3 = COLORS.surface; card.BorderSizePixel = 0; card.LayoutOrder = layoutOrder; card.Parent = parent
-	makeCorner(card)
-	local header = Instance.new("TextLabel"); header.Size = UDim2.new(1, -16, 0, 20); header.Position = UDim2.fromOffset(10, 8); header.BackgroundTransparency = 1; header.Font = Enum.Font.GothamBold; header.TextSize = 12; header.TextXAlignment = Enum.TextXAlignment.Left; header.TextColor3 = COLORS.text; header.Text = title; header.Parent = card
-	local body = Instance.new("TextLabel"); body.Size = UDim2.new(1, -16, 1, -34); body.Position = UDim2.fromOffset(10, 30); body.BackgroundTransparency = 1; body.Font = Enum.Font.Code; body.TextSize = 10; body.TextXAlignment = Enum.TextXAlignment.Left; body.TextYAlignment = Enum.TextYAlignment.Top; body.TextWrapped = true; body.TextColor3 = COLORS.textMuted; body.Text = "â€” loading â€”"; body.Parent = card
-	return body
-end
-normalStockLabel = makeStockCard(fruitsScroll, "Normal Stock", 1)
-mirageStockLabel = makeStockCard(fruitsScroll, "Mirage Stock", 2)
 createToggleRow(fruitsScroll, "Auto Random Fruit", false, function(v)
 	autoRandomFruit = v
-end, 3)
+end, 1)
 createToggleRow(fruitsScroll, "Auto Store Fruit", false, function(v)
 	autoStoreFruit = v
-end, 4)
+end, 2)
 createToggleRow(fruitsScroll, "Auto Tween to Fruit", false, function(v)
 	autoTweenFruit = v
 	if v then
@@ -3305,13 +3316,13 @@ createToggleRow(fruitsScroll, "Auto Tween to Fruit", false, function(v)
 		pendingFruitTarget = nil
 		clearMovement("fruit")
 	end
-end, 5)
+end, 3)
 createToggleRow(fruitsScroll, "Fruit ESP", false, function(v)
 	fruitEspEnabled = v
 	if not v then
 		clearFruitEsp()
 	end
-end, 6)
+end, 4)
 local function updateIslandMenuSize()
 	if not islandMenu.Visible then
 		islandMenu.Size = UDim2.new(1, 0, 0, 0)
@@ -3507,9 +3518,7 @@ connect(RunService.Heartbeat, function()
 	if bootstrapHits == 0 then
 		bootstrapHits = 1
 		pcall(RaidLoadLists)
-		pcall(refreshStockDisplay, true)
 	end
-	pcall(refreshStockDisplay)
 	if jumpBoostActive and appliedJump then
 		local humanoid = getHumanoid()
 		if humanoid then
@@ -3551,9 +3560,6 @@ if LocalPlayer.Character then
 end
 connect(LocalPlayer.CharacterAdded, hookJumpOnCharacter)
 switchTab("Player")
-task.defer(function()
-	refreshStockDisplay(true)
-end)
 local function setTeamStatus(text, color)
 	teamStatusLabel.TextColor3 = color or COLORS.textMuted
 	teamStatusLabel.Text = text
@@ -3601,7 +3607,6 @@ teleportTab.MouseButton1Click:Connect(function()
 end)
 fruitsTab.MouseButton1Click:Connect(function()
 	switchTab("Fruits")
-	refreshStockDisplay(true)
 end)
 debugTab.MouseButton1Click:Connect(function()
 	switchTab("Debug")
@@ -3747,6 +3752,10 @@ walkSlider.ApplyButton.MouseButton1Click:Connect(applyWalk)
 jumpSlider.ApplyButton.MouseButton1Click:Connect(applyJump)
 btnUnload.MouseButton1Click:Connect(unload)
 _G.PlayerSettingsGUI_Unload = unload
+HubDebug.Log("SYS", "GUI loaded")
+if HubDebug.enabled then
+	HubDebugMaybeSnapshot("boot")
+end
 end
 return buildGui
 end)()
@@ -3758,13 +3767,13 @@ if not buildOk then
 end
 local nativeWarn = warn
 warn = function(...)
-	local parts = {}
-	for i = 1, select("#", ...) do
-		table.insert(parts, tostring(select(i, ...)))
+	if HubDebug.enabled then
+		local parts = {}
+		for i = 1, select("#", ...) do
+			table.insert(parts, tostring(select(i, ...)))
+		end
+		HubDebug.Log("WARN", table.concat(parts, " "))
 	end
-	HubDebug.Log("WARN", table.concat(parts, " "))
 	return nativeWarn(...)
 end
-HubDebug.Log("SYS", "GUI loaded — debug recorder active")
-HubDebugMaybeSnapshot("boot")
 print("[PlayerSettingsGUI] Loaded successfully.")
