@@ -2,11 +2,12 @@
 	ESPController (LocalScript)
 	Place in StarterGui as a LocalScript.
 
-	Professional screen-space ESP with blue body highlights, hide/delete controls.
+	Professional screen-space ESP with per-team colored highlights, hide/delete controls.
 ]]
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
+local Teams = game:GetService("Teams")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
@@ -26,14 +27,18 @@ local panel: Frame
 local restoreIcon: TextButton
 local espButton: TextButton
 
-local BODY_FILL = Color3.fromRGB(0, 120, 255)
-local BODY_OUTLINE = Color3.fromRGB(120, 210, 255)
 local ACCENT_ON = Color3.fromRGB(0, 170, 255)
 local ACCENT_OFF = Color3.fromRGB(55, 58, 68)
 local ACCENT_DELETE = Color3.fromRGB(180, 55, 55)
 local TEXT_PRIMARY = Color3.fromRGB(255, 255, 255)
 local TEXT_SECONDARY = Color3.fromRGB(185, 195, 210)
-local TEXT_DISTANCE = Color3.fromRGB(100, 210, 255)
+local NO_TEAM_COLORS = {
+	fill = Color3.fromRGB(140, 145, 155),
+	outline = Color3.fromRGB(190, 195, 205),
+	accent = Color3.fromRGB(170, 175, 185),
+}
+
+local teamPaletteCache: { [Team]: typeof(NO_TEAM_COLORS) } = {}
 
 local MIN_TEXT_SIZE = 11
 local MAX_TEXT_SIZE = 16
@@ -80,6 +85,56 @@ local function isValidTarget(player: Player, character: Model?): boolean
 	return humanoid.Health > 0
 end
 
+local function brighten(color: Color3, amount: number): Color3
+	return Color3.new(
+		math.clamp(color.R + amount, 0, 1),
+		math.clamp(color.G + amount, 0, 1),
+		math.clamp(color.B + amount, 0, 1)
+	)
+end
+
+local function getTeamInfo(player: Player): (typeof(NO_TEAM_COLORS), string)
+	local team = player.Team
+	if not team then
+		return NO_TEAM_COLORS, "No Team"
+	end
+
+	local cached = teamPaletteCache[team]
+	if not cached then
+		local base = team.TeamColor.Color
+		cached = {
+			fill = base,
+			outline = brighten(base, 0.22),
+			accent = brighten(base, 0.12),
+		}
+		teamPaletteCache[team] = cached
+	end
+
+	return cached, team.Name
+end
+
+local function applyTeamColors(player: Player, highlight: Highlight?, tag: Frame?)
+	local colors, teamName = getTeamInfo(player)
+
+	if highlight then
+		highlight.FillColor = colors.fill
+		highlight.OutlineColor = colors.outline
+	end
+
+	if tag then
+		local teamLabel = tag:FindFirstChild("TeamName") :: TextLabel?
+		local distanceLabel = tag:FindFirstChild("Distance") :: TextLabel?
+
+		if teamLabel then
+			teamLabel.Text = teamName
+			teamLabel.TextColor3 = colors.accent
+		end
+		if distanceLabel then
+			distanceLabel.TextColor3 = colors.outline
+		end
+	end
+end
+
 local function formatDistance(studs: number): string
 	if studs >= 1000 then
 		return string.format("%.1fkm", studs / 1000)
@@ -102,7 +157,7 @@ local function createScreenTag(player: Player): Frame
 	tag.BackgroundTransparency = 1
 	tag.BorderSizePixel = 0
 	tag.AnchorPoint = Vector2.new(0.5, 1)
-	tag.Size = UDim2.fromOffset(260, 56)
+	tag.Size = UDim2.fromOffset(260, 68)
 	tag.Visible = false
 	tag.Parent = espOverlay
 
@@ -140,29 +195,47 @@ local function createScreenTag(player: Player): Frame
 	usernameLabel.Parent = tag
 	applyTextStroke(usernameLabel)
 
+	local teamLabel = Instance.new("TextLabel")
+	teamLabel.Name = "TeamName"
+	teamLabel.BackgroundTransparency = 1
+	teamLabel.Size = UDim2.new(1, 0, 0, 12)
+	teamLabel.Font = Enum.Font.GothamMedium
+	teamLabel.TextSize = 11
+	teamLabel.TextColor3 = TEXT_SECONDARY
+	teamLabel.TextXAlignment = Enum.TextXAlignment.Center
+	teamLabel.TextYAlignment = Enum.TextYAlignment.Center
+	teamLabel.Text = "No Team"
+	teamLabel.LayoutOrder = 3
+	teamLabel.Parent = tag
+	applyTextStroke(teamLabel)
+
 	local distanceLabel = Instance.new("TextLabel")
 	distanceLabel.Name = "Distance"
 	distanceLabel.BackgroundTransparency = 1
 	distanceLabel.Size = UDim2.new(1, 0, 0, 14)
 	distanceLabel.Font = Enum.Font.GothamMedium
 	distanceLabel.TextSize = 12
-	distanceLabel.TextColor3 = TEXT_DISTANCE
+	distanceLabel.TextColor3 = TEXT_SECONDARY
 	distanceLabel.TextXAlignment = Enum.TextXAlignment.Center
 	distanceLabel.TextYAlignment = Enum.TextYAlignment.Center
 	distanceLabel.Text = "0m"
-	distanceLabel.LayoutOrder = 3
+	distanceLabel.LayoutOrder = 4
 	distanceLabel.Parent = tag
 	applyTextStroke(distanceLabel)
+
+	applyTeamColors(player, nil, tag)
 
 	return tag
 end
 
-local function createBodyHighlight(character: Model): Highlight
+local function createBodyHighlight(character: Model, player: Player): Highlight
+	local colors = select(1, getTeamInfo(player))
+
 	local highlight = Instance.new("Highlight")
 	highlight.Name = "ESPBodyHighlight"
 	highlight.Adornee = character
-	highlight.FillColor = BODY_FILL
-	highlight.OutlineColor = BODY_OUTLINE
+	highlight.FillColor = colors.fill
+	highlight.OutlineColor = colors.outline
 	highlight.FillTransparency = 0.45
 	highlight.OutlineTransparency = 0
 	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -250,6 +323,7 @@ local function updatePlayerESP(player: Player)
 		if data.highlight then
 			data.highlight.Enabled = true
 			data.highlight.Adornee = character
+			applyTeamColors(player, data.highlight, tag)
 		end
 		return
 	end
@@ -298,6 +372,7 @@ local function updatePlayerESP(player: Player)
 	if data.highlight then
 		data.highlight.Enabled = true
 		data.highlight.Adornee = character
+		applyTeamColors(player, data.highlight, tag)
 	end
 end
 
@@ -328,7 +403,7 @@ local function setupPlayerESP(player: Player)
 				return
 			end
 
-			data.highlight = createBodyHighlight(character)
+			data.highlight = createBodyHighlight(character, player)
 			data.tag = createScreenTag(player)
 
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -350,6 +425,13 @@ local function setupPlayerESP(player: Player)
 	local connections: { RBXScriptConnection } = {}
 	table.insert(connections, player.CharacterAdded:Connect(onCharacterAdded))
 	table.insert(connections, player:GetPropertyChangedSignal("DisplayName"):Connect(function()
+		updatePlayerESP(player)
+	end))
+	table.insert(connections, player:GetPropertyChangedSignal("Team"):Connect(function()
+		local data = trackedPlayers[player]
+		if data then
+			applyTeamColors(player, data.highlight, data.tag)
+		end
 		updatePlayerESP(player)
 	end))
 
@@ -559,7 +641,7 @@ restoreCorner.CornerRadius = UDim.new(1, 0)
 restoreCorner.Parent = restoreIcon
 
 local restoreStroke = Instance.new("UIStroke")
-restoreStroke.Color = BODY_OUTLINE
+restoreStroke.Color = ACCENT_ON
 restoreStroke.Thickness = 1
 restoreStroke.Transparency = 0.25
 restoreStroke.Parent = restoreIcon
