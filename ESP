@@ -1,10 +1,8 @@
 --[[
 	ESPController (LocalScript)
-	Place inside StarterGui > ScreenGui (or StarterGui directly — it creates its own GUI).
+	Place in StarterGui as a LocalScript.
 
-	Toggle the ESP button to show all players with:
-	- Blue body highlight visible through walls
-	- Display name, username, and distance above each player
+	Professional screen-space ESP with blue body highlights, hide/delete controls.
 ]]
 
 local Players = game:GetService("Players")
@@ -12,23 +10,39 @@ local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
 
 local ESP_ENABLED = false
+local GUI_HIDDEN = false
+local SCRIPT_ALIVE = true
 
--- Per-player tracking: { highlight, billboard, connections }
 local trackedPlayers: { [Player]: any } = {}
-local heartbeatConnection: RBXScriptConnection? = nil
+local renderConnection: RBXScriptConnection? = nil
 local playerAddedConnection: RBXScriptConnection? = nil
 local playerRemovingConnection: RBXScriptConnection? = nil
 
--- Colors
+local screenGui: ScreenGui
+local espOverlay: ScreenGui
+local panel: Frame
+local restoreIcon: TextButton
+local espButton: TextButton
+
 local BODY_FILL = Color3.fromRGB(0, 120, 255)
 local BODY_OUTLINE = Color3.fromRGB(120, 210, 255)
 local ACCENT_ON = Color3.fromRGB(0, 170, 255)
 local ACCENT_OFF = Color3.fromRGB(55, 58, 68)
-local TEXT_PRIMARY = Color3.fromRGB(245, 248, 255)
-local TEXT_SECONDARY = Color3.fromRGB(170, 185, 210)
+local ACCENT_DELETE = Color3.fromRGB(180, 55, 55)
+local TEXT_PRIMARY = Color3.fromRGB(255, 255, 255)
+local TEXT_SECONDARY = Color3.fromRGB(185, 195, 210)
+local TEXT_DISTANCE = Color3.fromRGB(100, 210, 255)
+
+local MIN_TEXT_SIZE = 11
+local MAX_TEXT_SIZE = 16
+local FADE_START_STUDS = 350
+local FADE_END_STUDS = 900
+
+local function getCamera(): Camera?
+	return workspace.CurrentCamera
+end
 
 local function getCharacterRoot(character: Model): BasePart?
 	local root = character:FindFirstChild("HumanoidRootPart") :: BasePart?
@@ -38,11 +52,22 @@ local function getCharacterRoot(character: Model): BasePart?
 	return character:FindFirstChild("Head") :: BasePart?
 end
 
-local function isValidTarget(player: Player, character: Model?): boolean
-	if player == LocalPlayer then
-		return false
+local function getHeadAnchor(character: Model): Vector3?
+	local head = character:FindFirstChild("Head") :: BasePart?
+	if head then
+		return head.Position + Vector3.new(0, head.Size.Y * 0.5 + 0.35, 0)
 	end
-	if not character then
+
+	local root = getCharacterRoot(character)
+	if root then
+		return root.Position + Vector3.new(0, 2.8, 0)
+	end
+
+	return nil
+end
+
+local function isValidTarget(player: Player, character: Model?): boolean
+	if player == LocalPlayer or not character then
 		return false
 	end
 
@@ -51,11 +76,8 @@ local function isValidTarget(player: Player, character: Model?): boolean
 	if not humanoid or not root then
 		return false
 	end
-	if humanoid.Health <= 0 then
-		return false
-	end
 
-	return true
+	return humanoid.Health > 0
 end
 
 local function formatDistance(studs: number): string
@@ -65,64 +87,44 @@ local function formatDistance(studs: number): string
 	return string.format("%dm", math.floor(studs + 0.5))
 end
 
-local function createInfoBillboard(root: BasePart, player: Player): BillboardGui
-	local billboard = Instance.new("BillboardGui")
-	billboard.Name = "ESPInfo"
-	billboard.Adornee = root
-	billboard.AlwaysOnTop = true
-	billboard.LightInfluence = 0
-	billboard.MaxDistance = 10000
-	billboard.Size = UDim2.fromOffset(220, 72)
-	billboard.StudsOffset = Vector3.new(0, 3.2, 0)
-	billboard.Parent = root
-
-	local container = Instance.new("Frame")
-	container.Name = "Container"
-	container.BackgroundColor3 = Color3.fromRGB(12, 16, 24)
-	container.BackgroundTransparency = 0.25
-	container.BorderSizePixel = 0
-	container.Size = UDim2.fromScale(1, 1)
-	container.Parent = billboard
-
-	local corner = Instance.new("UICorner")
-	corner.CornerRadius = UDim.new(0, 8)
-	corner.Parent = container
-
+local function applyTextStroke(label: TextLabel, thickness: number?)
 	local stroke = Instance.new("UIStroke")
-	stroke.Color = BODY_OUTLINE
-	stroke.Thickness = 1
-	stroke.Transparency = 0.35
-	stroke.Parent = container
+	stroke.Name = "Outline"
+	stroke.Color = Color3.fromRGB(0, 0, 0)
+	stroke.Thickness = thickness or 1.2
+	stroke.Transparency = 0.15
+	stroke.Parent = label
+end
 
-	local padding = Instance.new("UIPadding")
-	padding.PaddingLeft = UDim.new(0, 10)
-	padding.PaddingRight = UDim.new(0, 10)
-	padding.PaddingTop = UDim.new(0, 8)
-	padding.PaddingBottom = UDim.new(0, 8)
-	padding.Parent = container
+local function createScreenTag(player: Player): Frame
+	local tag = Instance.new("Frame")
+	tag.Name = "Tag_" .. player.Name
+	tag.BackgroundTransparency = 1
+	tag.BorderSizePixel = 0
+	tag.AnchorPoint = Vector2.new(0.5, 1)
+	tag.Size = UDim2.fromOffset(260, 56)
+	tag.Visible = false
+	tag.Parent = espOverlay
 
 	local layout = Instance.new("UIListLayout")
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Padding = UDim.new(0, 2)
-	layout.Parent = container
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.Padding = UDim.new(0, 1)
+	layout.Parent = tag
 
 	local displayNameLabel = Instance.new("TextLabel")
 	displayNameLabel.Name = "DisplayName"
 	displayNameLabel.BackgroundTransparency = 1
 	displayNameLabel.Size = UDim2.new(1, 0, 0, 18)
 	displayNameLabel.Font = Enum.Font.GothamBold
-	displayNameLabel.TextSize = 15
-	displayNameLabel.TextXAlignment = Enum.TextXAlignment.Left
+	displayNameLabel.TextSize = MAX_TEXT_SIZE
 	displayNameLabel.TextColor3 = TEXT_PRIMARY
+	displayNameLabel.TextXAlignment = Enum.TextXAlignment.Center
+	displayNameLabel.TextYAlignment = Enum.TextYAlignment.Center
 	displayNameLabel.Text = player.DisplayName
 	displayNameLabel.LayoutOrder = 1
-	displayNameLabel.Parent = container
-
-	local displayStroke = Instance.new("UIStroke")
-	displayStroke.Color = Color3.fromRGB(0, 0, 0)
-	displayStroke.Thickness = 1
-	displayStroke.Transparency = 0.55
-	displayStroke.Parent = displayNameLabel
+	displayNameLabel.Parent = tag
+	applyTextStroke(displayNameLabel, 1.4)
 
 	local usernameLabel = Instance.new("TextLabel")
 	usernameLabel.Name = "Username"
@@ -130,11 +132,13 @@ local function createInfoBillboard(root: BasePart, player: Player): BillboardGui
 	usernameLabel.Size = UDim2.new(1, 0, 0, 14)
 	usernameLabel.Font = Enum.Font.Gotham
 	usernameLabel.TextSize = 12
-	usernameLabel.TextXAlignment = Enum.TextXAlignment.Left
 	usernameLabel.TextColor3 = TEXT_SECONDARY
+	usernameLabel.TextXAlignment = Enum.TextXAlignment.Center
+	usernameLabel.TextYAlignment = Enum.TextYAlignment.Center
 	usernameLabel.Text = "@" .. player.Name
 	usernameLabel.LayoutOrder = 2
-	usernameLabel.Parent = container
+	usernameLabel.Parent = tag
+	applyTextStroke(usernameLabel)
 
 	local distanceLabel = Instance.new("TextLabel")
 	distanceLabel.Name = "Distance"
@@ -142,13 +146,15 @@ local function createInfoBillboard(root: BasePart, player: Player): BillboardGui
 	distanceLabel.Size = UDim2.new(1, 0, 0, 14)
 	distanceLabel.Font = Enum.Font.GothamMedium
 	distanceLabel.TextSize = 12
-	distanceLabel.TextXAlignment = Enum.TextXAlignment.Left
-	distanceLabel.TextColor3 = BODY_OUTLINE
+	distanceLabel.TextColor3 = TEXT_DISTANCE
+	distanceLabel.TextXAlignment = Enum.TextXAlignment.Center
+	distanceLabel.TextYAlignment = Enum.TextYAlignment.Center
 	distanceLabel.Text = "0m"
 	distanceLabel.LayoutOrder = 3
-	distanceLabel.Parent = container
+	distanceLabel.Parent = tag
+	applyTextStroke(distanceLabel)
 
-	return billboard
+	return tag
 end
 
 local function createBodyHighlight(character: Model): Highlight
@@ -181,10 +187,10 @@ local function destroyPlayerVisuals(data: any)
 	end
 	data.highlight = nil
 
-	if data.billboard and data.billboard.Parent then
-		data.billboard:Destroy()
+	if data.tag and data.tag.Parent then
+		data.tag:Destroy()
 	end
-	data.billboard = nil
+	data.tag = nil
 end
 
 local function clearPlayerESP(player: Player)
@@ -198,54 +204,100 @@ local function clearPlayerESP(player: Player)
 	trackedPlayers[player] = nil
 end
 
-local function updatePlayerLabels(player: Player)
+local function getDistanceOpacity(distance: number): number
+	if distance <= FADE_START_STUDS then
+		return 1
+	end
+	if distance >= FADE_END_STUDS then
+		return 0.35
+	end
+	local alpha = (distance - FADE_START_STUDS) / (FADE_END_STUDS - FADE_START_STUDS)
+	return 1 - (alpha * 0.65)
+end
+
+local function getDistanceTextSize(distance: number): number
+	local scale = math.clamp(1 - (distance / 500), 0.55, 1)
+	return math.floor(MIN_TEXT_SIZE + (MAX_TEXT_SIZE - MIN_TEXT_SIZE) * scale + 0.5)
+end
+
+local function updatePlayerESP(player: Player)
 	local data = trackedPlayers[player]
-	if not data or not data.billboard then
+	if not data or not data.tag then
 		return
 	end
 
 	local character = player.Character
-	if not isValidTarget(player, character) then
-		if data.billboard.Enabled ~= false then
-			data.billboard.Enabled = false
-		end
+	local tag = data.tag :: Frame
+	local camera = getCamera()
+
+	if not ESP_ENABLED or not camera or not isValidTarget(player, character) then
+		tag.Visible = false
 		if data.highlight then
 			data.highlight.Enabled = false
 		end
 		return
 	end
 
-	local root = getCharacterRoot(character)
-	if not root then
+	local anchor = getHeadAnchor(character)
+	if not anchor then
+		tag.Visible = false
 		return
 	end
 
-	if data.billboard.Adornee ~= root then
-		data.billboard.Adornee = root
+	local viewport, onScreen = camera:WorldToViewportPoint(anchor)
+	if not onScreen or viewport.Z <= 0 then
+		tag.Visible = false
+		if data.highlight then
+			data.highlight.Enabled = true
+			data.highlight.Adornee = character
+		end
+		return
 	end
 
-	data.billboard.Enabled = true
+	local distance = (anchor - camera.CFrame.Position).Magnitude
+	local opacity = getDistanceOpacity(distance)
+	local textSize = getDistanceTextSize(distance)
+
+	tag.Visible = true
+	tag.Position = UDim2.fromOffset(viewport.X, viewport.Y)
+
+	local displayNameLabel = tag:FindFirstChild("DisplayName") :: TextLabel?
+	local usernameLabel = tag:FindFirstChild("Username") :: TextLabel?
+	local distanceLabel = tag:FindFirstChild("Distance") :: TextLabel?
+
+	if displayNameLabel then
+		displayNameLabel.Text = player.DisplayName
+		displayNameLabel.TextSize = textSize
+		displayNameLabel.TextTransparency = 1 - opacity
+		local stroke = displayNameLabel:FindFirstChild("Outline") :: UIStroke?
+		if stroke then
+			stroke.Transparency = 0.15 + (1 - opacity) * 0.85
+		end
+	end
+
+	if usernameLabel then
+		usernameLabel.Text = "@" .. player.Name
+		usernameLabel.TextSize = math.max(MIN_TEXT_SIZE - 1, textSize - 2)
+		usernameLabel.TextTransparency = 1 - opacity
+		local stroke = usernameLabel:FindFirstChild("Outline") :: UIStroke?
+		if stroke then
+			stroke.Transparency = 0.15 + (1 - opacity) * 0.85
+		end
+	end
+
+	if distanceLabel then
+		distanceLabel.Text = formatDistance(distance)
+		distanceLabel.TextSize = math.max(MIN_TEXT_SIZE - 1, textSize - 2)
+		distanceLabel.TextTransparency = 1 - opacity
+		local stroke = distanceLabel:FindFirstChild("Outline") :: UIStroke?
+		if stroke then
+			stroke.Transparency = 0.15 + (1 - opacity) * 0.85
+		end
+	end
+
 	if data.highlight then
 		data.highlight.Enabled = true
 		data.highlight.Adornee = character
-	end
-
-	local container = data.billboard:FindFirstChild("Container")
-	if container then
-		local displayNameLabel = container:FindFirstChild("DisplayName") :: TextLabel?
-		local usernameLabel = container:FindFirstChild("Username") :: TextLabel?
-		local distanceLabel = container:FindFirstChild("Distance") :: TextLabel?
-
-		if displayNameLabel then
-			displayNameLabel.Text = player.DisplayName
-		end
-		if usernameLabel then
-			usernameLabel.Text = "@" .. player.Name
-		end
-		if distanceLabel and Camera then
-			local distance = (root.Position - Camera.CFrame.Position).Magnitude
-			distanceLabel.Text = formatDistance(distance)
-		end
 	end
 end
 
@@ -262,61 +314,48 @@ local function setupPlayerESP(player: Player)
 			destroyPlayerVisuals(existing)
 		end
 
-		if not ESP_ENABLED then
+		if not ESP_ENABLED or not SCRIPT_ALIVE then
 			return
 		end
 
 		task.defer(function()
-			if not character.Parent then
+			if not character.Parent or not isValidTarget(player, character) then
 				return
 			end
-			if not isValidTarget(player, character) then
-				return
-			end
-
-			local root = getCharacterRoot(character)
-			if not root then
-				return
-			end
-
-			local highlight = createBodyHighlight(character)
-			local billboard = createInfoBillboard(root, player)
 
 			local data = trackedPlayers[player]
 			if not data then
-				highlight:Destroy()
-				billboard:Destroy()
 				return
 			end
 
-			data.highlight = highlight
-			data.billboard = billboard
+			data.highlight = createBodyHighlight(character)
+			data.tag = createScreenTag(player)
 
 			local humanoid = character:FindFirstChildOfClass("Humanoid")
 			if humanoid then
 				table.insert(data.connections, humanoid.Died:Connect(function()
+					if data.tag then
+						data.tag.Visible = false
+					end
 					if data.highlight then
 						data.highlight.Enabled = false
-					end
-					if data.billboard then
-						data.billboard.Enabled = false
 					end
 				end))
 			end
 
-			updatePlayerLabels(player)
+			updatePlayerESP(player)
 		end)
 	end
 
 	local connections: { RBXScriptConnection } = {}
 	table.insert(connections, player.CharacterAdded:Connect(onCharacterAdded))
 	table.insert(connections, player:GetPropertyChangedSignal("DisplayName"):Connect(function()
-		updatePlayerLabels(player)
+		updatePlayerESP(player)
 	end))
 
 	trackedPlayers[player] = {
 		highlight = nil,
-		billboard = nil,
+		tag = nil,
 		connections = connections,
 	}
 
@@ -335,13 +374,13 @@ local function clearAllESP()
 	for player in trackedPlayers do
 		clearPlayerESP(player)
 	end
-	trackedPlayers = {}
+	table.clear(trackedPlayers)
 end
 
 local function stopESPRuntime()
-	if heartbeatConnection then
-		heartbeatConnection:Disconnect()
-		heartbeatConnection = nil
+	if renderConnection then
+		renderConnection:Disconnect()
+		renderConnection = nil
 	end
 	if playerAddedConnection then
 		playerAddedConnection:Disconnect()
@@ -364,9 +403,9 @@ local function startESPRuntime()
 		clearPlayerESP(player)
 	end)
 
-	heartbeatConnection = RunService.Heartbeat:Connect(function()
+	renderConnection = RunService.RenderStepped:Connect(function()
 		for player in trackedPlayers do
-			updatePlayerLabels(player)
+			updatePlayerESP(player)
 		end
 	end)
 
@@ -374,7 +413,7 @@ local function startESPRuntime()
 end
 
 local function setESPEnabled(enabled: boolean)
-	if ESP_ENABLED == enabled then
+	if not SCRIPT_ALIVE or ESP_ENABLED == enabled then
 		return
 	end
 
@@ -388,70 +427,144 @@ local function setESPEnabled(enabled: boolean)
 	end
 end
 
--- GUI -----------------------------------------------------------------------
+local function createActionButton(parent: Instance, name: string, text: string, color: Color3, layoutOrder: number): TextButton
+	local button = Instance.new("TextButton")
+	button.Name = name
+	button.LayoutOrder = layoutOrder
+	button.Size = UDim2.new(1, 0, 0, 22)
+	button.BackgroundColor3 = color
+	button.BorderSizePixel = 0
+	button.AutoButtonColor = false
+	button.Font = Enum.Font.GothamBold
+	button.TextSize = 12
+	button.TextColor3 = TEXT_PRIMARY
+	button.Text = text
+	button.Parent = parent
 
-local function createGUI(): (TextButton, Frame)
-	local screenGui = Instance.new("ScreenGui")
-	screenGui.Name = "ESPGui"
-	screenGui.ResetOnSpawn = false
-	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = button
 
-	local panel = Instance.new("Frame")
-	panel.Name = "Panel"
-	panel.AnchorPoint = Vector2.new(0, 0.5)
-	panel.Position = UDim2.new(0, 16, 0.5, 0)
-	panel.Size = UDim2.fromOffset(132, 52)
-	panel.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
-	panel.BackgroundTransparency = 0.08
-	panel.BorderSizePixel = 0
-	panel.Parent = screenGui
-
-	local panelCorner = Instance.new("UICorner")
-	panelCorner.CornerRadius = UDim.new(0, 10)
-	panelCorner.Parent = panel
-
-	local panelStroke = Instance.new("UIStroke")
-	panelStroke.Color = Color3.fromRGB(70, 78, 98)
-	panelStroke.Thickness = 1
-	panelStroke.Transparency = 0.35
-	panelStroke.Parent = panel
-
-	local title = Instance.new("TextLabel")
-	title.Name = "Title"
-	title.BackgroundTransparency = 1
-	title.Position = UDim2.fromOffset(12, 8)
-	title.Size = UDim2.new(1, -24, 0, 12)
-	title.Font = Enum.Font.GothamBold
-	title.TextSize = 11
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = TEXT_SECONDARY
-	title.Text = "PLAYER ESP"
-	title.Parent = panel
-
-	local espButton = Instance.new("TextButton")
-	espButton.Name = "ESP"
-	espButton.Position = UDim2.fromOffset(10, 24)
-	espButton.Size = UDim2.new(1, -20, 0, 22)
-	espButton.BackgroundColor3 = ACCENT_OFF
-	espButton.BorderSizePixel = 0
-	espButton.AutoButtonColor = false
-	espButton.Font = Enum.Font.GothamBold
-	espButton.TextSize = 13
-	espButton.TextColor3 = TEXT_PRIMARY
-	espButton.Text = "ESP: OFF"
-	espButton.Parent = panel
-
-	local buttonCorner = Instance.new("UICorner")
-	buttonCorner.CornerRadius = UDim.new(0, 6)
-	buttonCorner.Parent = espButton
-
-	return espButton, panel
+	return button
 end
 
-local espButton, panel = createGUI()
+local function setPanelHidden(hidden: boolean)
+	GUI_HIDDEN = hidden
+	panel.Visible = not hidden
+	restoreIcon.Visible = hidden
+end
 
-local function updateButtonVisuals()
+local function destroyScriptCompletely()
+	if not SCRIPT_ALIVE then
+		return
+	end
+
+	SCRIPT_ALIVE = false
+	setESPEnabled(false)
+
+	stopESPRuntime()
+
+	if espOverlay and espOverlay.Parent then
+		espOverlay:Destroy()
+	end
+	if screenGui and screenGui.Parent then
+		screenGui:Destroy()
+	end
+
+	script:Destroy()
+end
+
+-- GUI -----------------------------------------------------------------------
+
+screenGui = Instance.new("ScreenGui")
+screenGui.Name = "ESPGui"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+espOverlay = Instance.new("ScreenGui")
+espOverlay.Name = "ESPOverlay"
+espOverlay.ResetOnSpawn = false
+espOverlay.IgnoreGuiInset = true
+espOverlay.DisplayOrder = 50
+espOverlay.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+espOverlay.Parent = LocalPlayer.PlayerGui
+
+panel = Instance.new("Frame")
+panel.Name = "Panel"
+panel.AnchorPoint = Vector2.new(0, 0.5)
+panel.Position = UDim2.new(0, 16, 0.5, 0)
+panel.Size = UDim2.fromOffset(132, 118)
+panel.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+panel.BackgroundTransparency = 0.08
+panel.BorderSizePixel = 0
+panel.Parent = screenGui
+
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 10)
+panelCorner.Parent = panel
+
+local panelStroke = Instance.new("UIStroke")
+panelStroke.Color = Color3.fromRGB(70, 78, 98)
+panelStroke.Thickness = 1
+panelStroke.Transparency = 0.35
+panelStroke.Parent = panel
+
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.BackgroundTransparency = 1
+title.Position = UDim2.fromOffset(12, 8)
+title.Size = UDim2.new(1, -24, 0, 12)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 11
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.TextColor3 = TEXT_SECONDARY
+title.Text = "PLAYER ESP"
+title.Parent = panel
+
+local buttonList = Instance.new("Frame")
+buttonList.Name = "Buttons"
+buttonList.BackgroundTransparency = 1
+buttonList.Position = UDim2.fromOffset(10, 24)
+buttonList.Size = UDim2.new(1, -20, 1, -32)
+buttonList.Parent = panel
+
+local buttonLayout = Instance.new("UIListLayout")
+buttonLayout.SortOrder = Enum.SortOrder.LayoutOrder
+buttonLayout.Padding = UDim.new(0, 5)
+buttonLayout.Parent = buttonList
+
+espButton = createActionButton(buttonList, "ESP", "ESP: OFF", ACCENT_OFF, 1)
+local hideButton = createActionButton(buttonList, "Hide", "HIDE", Color3.fromRGB(70, 76, 92), 2)
+local deleteButton = createActionButton(buttonList, "Delete", "DELETE", ACCENT_DELETE, 3)
+
+restoreIcon = Instance.new("TextButton")
+restoreIcon.Name = "RestoreIcon"
+restoreIcon.AnchorPoint = Vector2.new(0, 0.5)
+restoreIcon.Position = UDim2.new(0, 16, 0.5, 0)
+restoreIcon.Size = UDim2.fromOffset(36, 36)
+restoreIcon.BackgroundColor3 = Color3.fromRGB(18, 20, 28)
+restoreIcon.BackgroundTransparency = 0.08
+restoreIcon.BorderSizePixel = 0
+restoreIcon.AutoButtonColor = false
+restoreIcon.Font = Enum.Font.GothamBold
+restoreIcon.TextSize = 11
+restoreIcon.TextColor3 = ACCENT_ON
+restoreIcon.Text = "ESP"
+restoreIcon.Visible = false
+restoreIcon.Parent = screenGui
+
+local restoreCorner = Instance.new("UICorner")
+restoreCorner.CornerRadius = UDim.new(1, 0)
+restoreCorner.Parent = restoreIcon
+
+local restoreStroke = Instance.new("UIStroke")
+restoreStroke.Color = BODY_OUTLINE
+restoreStroke.Thickness = 1
+restoreStroke.Transparency = 0.25
+restoreStroke.Parent = restoreIcon
+
+local function updateEspButtonVisuals()
 	local targetColor = ESP_ENABLED and ACCENT_ON or ACCENT_OFF
 	local targetText = ESP_ENABLED and "ESP: ON" or "ESP: OFF"
 
@@ -482,7 +595,20 @@ end)
 
 espButton.Activated:Connect(function()
 	setESPEnabled(not ESP_ENABLED)
-	updateButtonVisuals()
+	updateEspButtonVisuals()
 end)
 
-updateButtonVisuals()
+hideButton.Activated:Connect(function()
+	setPanelHidden(true)
+end)
+
+restoreIcon.Activated:Connect(function()
+	setPanelHidden(false)
+end)
+
+deleteButton.Activated:Connect(function()
+	destroyScriptCompletely()
+end)
+
+updateEspButtonVisuals()
+setPanelHidden(false)
