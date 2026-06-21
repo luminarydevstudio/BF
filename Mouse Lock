@@ -1,0 +1,156 @@
+--[[
+	MouseLookFix (LocalScript / executor script)
+	Use on LDPlayer Android Roblox when Shooting Mode hides the mouse
+	but the camera still does not turn.
+
+	Install: execute this in-game the same way you run ESPController.
+	Toggle: M key | Disable: End key
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+
+local ENABLED = true
+local SENSITIVITY = 0.0028
+local MAX_PITCH = 89
+
+local yaw = 0
+local pitch = 0
+local bound = false
+local pendingDelta = Vector2.zero
+
+local function getRoot(): BasePart?
+	local character = LocalPlayer.Character
+	if not character then
+		return nil
+	end
+	return character:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+local function syncAnglesFromCharacter()
+	local root = getRoot()
+	if not root then
+		return
+	end
+	local _, y, _ = root.CFrame:ToOrientation()
+	yaw = math.deg(y)
+	pitch = 0
+end
+
+local function applyMouseLock()
+	UserInputService.MouseIconEnabled = false
+	UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter
+end
+
+local function getMouseDelta(): Vector2
+	local delta = UserInputService:GetMouseDelta()
+	if delta.Magnitude > 0 then
+		return delta
+	end
+
+	if pendingDelta.Magnitude > 0 then
+		local saved = pendingDelta
+		pendingDelta = Vector2.zero
+		return saved
+	end
+
+	return Vector2.zero
+end
+
+local function onInputChanged(input: InputObject)
+	if not ENABLED then
+		return
+	end
+
+	if input.UserInputType == Enum.UserInputType.MouseMovement then
+		local delta = input.Delta
+		if delta.Magnitude > 0 then
+			pendingDelta += delta
+		end
+	end
+end
+
+local function onRenderStep()
+	if not ENABLED then
+		return
+	end
+
+	applyMouseLock()
+
+	local delta = getMouseDelta()
+	if delta.Magnitude <= 0 then
+		return
+	end
+
+	local character = LocalPlayer.Character
+	local root = getRoot()
+	local head = character and character:FindFirstChild("Head") :: BasePart?
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	local camera = workspace.CurrentCamera
+
+	if not root or not head or not humanoid or humanoid.Health <= 0 or not camera then
+		return
+	end
+
+	yaw -= delta.X * SENSITIVITY * 60
+	pitch = math.clamp(pitch - delta.Y * SENSITIVITY * 60, -MAX_PITCH, MAX_PITCH)
+
+	humanoid.AutoRotate = false
+	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, math.rad(yaw), 0)
+
+	camera.CameraType = Enum.CameraType.Scriptable
+	camera.CFrame = CFrame.new(head.Position)
+		* CFrame.Angles(0, math.rad(yaw), 0)
+		* CFrame.Angles(math.rad(pitch), 0, 0)
+	camera.Focus = CFrame.new(root.Position + Vector3.new(0, 1.5, 0))
+end
+
+local function bind()
+	if bound then
+		return
+	end
+	bound = true
+
+	syncAnglesFromCharacter()
+
+	RunService:BindToRenderStep("EmulatorMouseLookFix", Enum.RenderPriority.Camera.Value + 10, onRenderStep)
+
+	UserInputService.InputChanged:Connect(onInputChanged)
+
+	LocalPlayer.CharacterAdded:Connect(function()
+		task.defer(syncAnglesFromCharacter)
+	end)
+
+	UserInputService.InputBegan:Connect(function(input, processed)
+		if processed then
+			return
+		end
+
+		if input.KeyCode == Enum.KeyCode.M then
+			ENABLED = not ENABLED
+			if ENABLED then
+				syncAnglesFromCharacter()
+				applyMouseLock()
+			else
+				UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+				UserInputService.MouseIconEnabled = true
+				local humanoid = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+				if humanoid then
+					humanoid.AutoRotate = true
+				end
+			end
+		elseif input.KeyCode == Enum.KeyCode.End then
+			ENABLED = false
+			RunService:UnbindFromRenderStep("EmulatorMouseLookFix")
+			bound = false
+			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
+			UserInputService.MouseIconEnabled = true
+		end
+	end)
+end
+
+bind()
+applyMouseLock()
